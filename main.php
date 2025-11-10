@@ -3,7 +3,7 @@
  * Plugin Name: Gravity Forms - Conditional Choices V2
  * Description: Define conditional choices for Gravity Forms fields.
  * Version: 2.0.0
- * Author: AI Assistant
+ * Author: Cerebral Consulting
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -25,7 +25,7 @@ class GFCC_V2_Plugin {
 
         // Frontend Hooks
         add_action( 'gform_enqueue_scripts', [ __CLASS__, 'enqueue_frontend_scripts' ], 10, 2 );
-        add_filter( 'gform_pre_render', [ __CLASS__, 'apply_conditions_server_side' ], 100 );
+        //add_filter( 'gform_pre_render', [ __CLASS__, 'apply_conditions_server_side' ], 100 );
         add_filter( 'gform_pre_validation', [ __CLASS__, 'apply_conditions_server_side' ], 100 );
         add_filter( 'gform_pre_submission_filter', [ __CLASS__, 'apply_conditions_server_side' ], 100 );
     }
@@ -265,13 +265,15 @@ class GFCC_V2_Plugin {
                                 }
                                 ?>
                             </ul>
+
+                            <p class="submit">
+                                <button type="submit" name="gfcc_save" class="button button-primary button-large"><?php esc_html_e( 'Save Configuration', 'gfcc' ); ?></button>
+                            </p>
                         </div>
                     </div>
                 </div>
 
-                <p class="submit">
-                    <button type="submit" name="gfcc_save" class="button button-primary button-large"><?php esc_html_e( 'Save Configuration', 'gfcc' ); ?></button>
-                </p>
+
             </form>
         </div>
 
@@ -328,6 +330,8 @@ class GFCC_V2_Plugin {
                             </li>
                         <?php endforeach; ?>
                     </ul>
+
+
                 </div>
             </div>
         </div>

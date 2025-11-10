@@ -41,9 +41,13 @@
     var $root = $('#gform_' + formId);
     var $fieldWrapper = $root.find('#field_' + formId + '_' + fieldId);
 
+    console.log("Running applyChoices");
+
     // Determine which choices to apply (if null, revert to original)
     var choicesToApply = choices === null ? originalChoices : choices;
     var allowedValues = (choicesToApply || []).map(function(ch) { return String(ch.value); });
+
+       console.log('Applying choices for field ' + fieldId + '. Allowed values:', allowedValues);
 
     // Handle <select> dropdowns
     var $select = $fieldWrapper.find('select');
@@ -61,7 +65,7 @@
       } else {
         $select.prop('selectedIndex', 0);
       }
-      
+
       // Trigger change for GF's own logic and other plugins
       $select.data('gfcc-internal-change', true);
       $select.trigger('change');
@@ -73,6 +77,7 @@
       return;
     }
 
+
     // Handle radio and checkbox lists
     var $inputs = $fieldWrapper.find('.gfield_radio input, .gfield_checkbox input');
     if ($inputs.length) {
@@ -80,7 +85,9 @@
         var $input = $(this);
         var val = String($input.val());
         var $choiceWrapper = $input.closest('.gchoice');
-        
+
+       console.log('Checking choice value: "' + val + '". Is allowed?', allowedValues.indexOf(val) > -1);
+
         if (allowedValues.indexOf(val) > -1) {
           $choiceWrapper.show();
         } else {
