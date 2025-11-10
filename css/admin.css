@@ -1,0 +1,142 @@
+.gfcc-edit-page .postbox {
+    margin-top: 20px;
+}
+
+.gfcc-group {
+    border: 1px solid #ccd0d4;
+    margin-bottom: 15px;
+}
+
+.gfcc-group .hndle {
+    cursor: pointer;
+    padding: 8px 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.gfcc-group-label-input {
+    flex-grow: 1;
+    margin: 0 10px;
+    font-size: 1em;
+    padding: 4px 8px;
+}
+
+
+.gfcc-group .inside {
+    padding: 0 12px 12px;
+}
+
+.gfcc-group-logic {
+    margin-bottom: 10px;
+    padding: 10px;
+    background: #f9f9f9;
+    border-bottom: 1px solid #eee;
+}
+
+.gfcc-rules-wrapper {
+    padding: 10px 0;
+}
+
+.gfcc-rule {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+    background: #fff;
+    padding: 8px;
+    border-radius: 4px;
+    border: 1px solid #ddd;
+    flex-wrap: wrap; /* Allow wrapping on small screens */
+}
+
+.gfcc-rule select {
+    /* Let it size naturally, but allow shrinking */
+    flex: 0 1 auto;
+}
+
+.gfcc-rule input[type="text"] {
+    /* Let it grow, but also shrink. Set a sensible base width */
+    flex: 1 1 150px;
+    /* This is the key: prevent it from overflowing the flex container */
+    min-width: 0;
+}
+
+.gfcc-rule .button-link-delete {
+    color: #a00;
+    text-decoration: none;
+}
+.gfcc-rule .button-link-delete:hover {
+    color: #d00;
+}
+
+.gfcc-add-rule {
+    margin-top: 5px;
+}
+
+.gfcc-group-choices {
+    margin-top: 15px;
+}
+
+#gfcc-choices-box, #gfcc-groups-container {
+    float: left;
+    width: 48%;
+}
+
+#gfcc-choices-box {
+    margin-left: 2%;
+}
+
+.gfcc-choices-list {
+    background: #fff;
+    border: 1px solid #ddd;
+    min-height: 150px;
+    padding: 5px;
+    border-radius: 3px;
+}
+
+.gfcc-choices-list li {
+    padding: 6px 10px;
+    background: #f0f0f1;
+    margin-bottom: 4px;
+    border-radius: 3px;
+    cursor: grab;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.gfcc-choices-list li:active {
+    cursor: grabbing;
+}
+
+.gfcc-choices-list li.ui-sortable-placeholder {
+    background: #e0e5ff;
+    visibility: visible !important;
+    height: 30px !important;
+    border: 1px dashed #a0a0a0;
+}
+
+.gfcc-choices-list li.ui-sortable-helper {
+    box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+    transform: rotate(3deg);
+}
+
+.gfcc-assigned-choices .gfcc-remove-choice {
+    color: #a00;
+    text-decoration: none;
+    font-weight: bold;
+    font-size: 1.2em;
+    padding: 0 5px;
+}
+.gfcc-assigned-choices .gfcc-remove-choice:hover {
+    color: #d00;
+}
+
+@media screen and (max-width: 1200px) {
+    #gfcc-choices-box, #gfcc-groups-container {
+        float: none;
+        width: 100%;
+        margin-left: 0;
+    }
+}

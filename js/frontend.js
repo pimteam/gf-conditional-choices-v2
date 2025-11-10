@@ -1,248 +1,236 @@
 (function ($) {
   'use strict';
 
-  function getFieldValue(formId, fieldId) {
-    var $root = $('#gform_' + formId);
+  // Cache for field values to avoid redundant DOM lookups
+  var valueCache = {};
 
-    // text/hidden/textarea/select
-    var $el = $root.find('#input_' + formId + '_' + fieldId);
-    if ($el.length) {
-      if ($el.is('select')) {
-        var v = $el.val();
-        if (Array.isArray(v)) v = v[0] || '';
-        return (v || '').toString();
-      }
-      if ($el.is('input, textarea')) {
-        return ($el.val() || '').toString();
-      }
+  function getFieldValue(formId, fieldId) {
+    var cacheKey = formId + '_' + fieldId;
+    // For now, we don't cache values as they can change.
+    // Caching could be implemented with a mechanism to invalidate on change.
+
+    var $root = $('#gform_' + formId);
+    var name = 'input_' + fieldId;
+
+    // Radio buttons
+    var $radio = $root.find('input[name="' + name + '"]:checked');
+    if ($radio.length) {
+      return $radio.val() || '';
     }
 
-    // radio - ПОПРАВЕН SELECTOR
-    var $rad = $root.find('input[name="input_' + formId + '_' + fieldId + '"][type=radio]:checked');
-    if ($rad.length) return ($rad.val() || '').toString();
+    // Checkboxes - returns an array of values
+    var $checkboxes = $root.find('input[name^="' + name + '_"]:checked');
+    if ($checkboxes.length) {
+        var values = [];
+        $checkboxes.each(function() {
+            values.push($(this).val());
+        });
+        return values;
+    }
 
-    // checkbox не поддържаме в M1
+    // Other input types (text, select, textarea, hidden)
+    var $el = $root.find('#input_' + formId + '_' + fieldId);
+    if ($el.length) {
+      return $el.val() || '';
+    }
+    
     return '';
   }
 
-  function applyChoices(formId, fieldId, choices) {
+  function applyChoices(formId, fieldId, choices, originalChoices) {
     var $root = $('#gform_' + formId);
+    var $fieldWrapper = $root.find('#field_' + formId + '_' + fieldId);
 
-    console.log('[GFCC] applyChoices for field ' + fieldId + ', choices:', choices);
+    // Determine which choices to apply (if null, revert to original)
+    var choicesToApply = choices === null ? originalChoices : choices;
+    var allowedValues = (choicesToApply || []).map(function(ch) { return String(ch.value); });
 
-    // select
-    var $sel = $root.find('#input_' + formId + '_' + fieldId);
-    console.log('[GFCC] Looking for select: #input_' + formId + '_' + fieldId, 'found:', $sel.length, 'is select:', $sel.is('select'));
+    // Handle <select> dropdowns
+    var $select = $fieldWrapper.find('select');
+    if ($select.length) {
+      var currentValue = $select.val();
+      $select.empty();
 
-    if ($sel.length && $sel.is('select')) {
-      var current = $sel.val();
-      console.log('[GFCC] SELECT field - current value:', current);
-      $sel.empty();
-      (choices || []).forEach(function (ch) {
-        $sel.append($('<option/>').attr('value', ch.value).text(ch.text));
+      (choicesToApply || []).forEach(function (ch) {
+        $select.append($('<option>').attr('value', ch.value).text(ch.text));
       });
-      if (current && (choices || []).some(function (ch) { return String(ch.value) === String(current); })) {
-        $sel.val(current);
+
+      // Restore selection if possible
+      if (currentValue && allowedValues.indexOf(String(currentValue)) > -1) {
+        $select.val(currentValue);
       } else {
-        $sel.prop('selectedIndex', 0);
+        $select.prop('selectedIndex', 0);
       }
-      $sel.trigger('change').trigger('chosen:updated'); // Enhanced UI
-      console.log('[GFCC] SELECT updated, new options count:', $sel.find('option').length);
+      
+      // Trigger change for GF's own logic and other plugins
+      $select.data('gfcc-internal-change', true);
+      $select.trigger('change');
+      $select.removeData('gfcc-internal-change');
+
+      if (window.gform) {
+        $select.trigger('chosen:updated');
+      }
       return;
     }
 
-    // radio: show/hide според allowed
-    var $field = $root.find('#field_' + formId + '_' + fieldId);
-    console.log('[GFCC] Looking for radio container: #field_' + formId + '_' + fieldId, 'found:', $field.length);
-
-    if ($field.length) {
-      var allowed = (choices || []).map(function (ch) { return String(ch.value); });
-      console.log('[GFCC] RADIO field - allowed values:', allowed);
-
-      var $inputs = $field.find('input[type=radio]');
-      console.log('[GFCC] Found radio inputs:', $inputs.length);
-
+    // Handle radio and checkbox lists
+    var $inputs = $fieldWrapper.find('.gfield_radio input, .gfield_checkbox input');
+    if ($inputs.length) {
       $inputs.each(function () {
-        var $inp = $(this);
-        var val = String($inp.val());
-        var ok = allowed.indexOf(val) !== -1;
-
-        // Gravity Forms използва .gchoice wrapper, не <li>
-        var $wrapper = $inp.closest('.gchoice, li');
-        console.log('[GFCC] Radio value "' + val + '" - allowed:', ok, '- wrapper found:', $wrapper.length);
-
-        if (ok) {
-          $wrapper.show();
+        var $input = $(this);
+        var val = String($input.val());
+        var $choiceWrapper = $input.closest('.gchoice');
+        
+        if (allowedValues.indexOf(val) > -1) {
+          $choiceWrapper.show();
         } else {
-          if ($inp.is(':checked')) {
-            $inp.prop('checked', false).trigger('change');
+          if ($input.is(':checked')) {
+            $input.data('gfcc-internal-change', true); // Set flag
+            $input.prop('checked', false).trigger('change');
+            $input.removeData('gfcc-internal-change'); // Clean up flag
           }
-          $wrapper.hide();
+          $choiceWrapper.hide();
         }
       });
-      return;
     }
-
-    // checkbox (за бъдеще)
-    var $checkboxContainer = $root.find('#field_' + formId + '_' + fieldId);
-    console.log('[GFCC] Looking for checkbox container, found:', $checkboxContainer.length);
-
-    if ($checkboxContainer.length) {
-      var allowed = (choices || []).map(function (ch) { return String(ch.value); });
-      var $inputs = $checkboxContainer.find('input[type=checkbox]');
-      console.log('[GFCC] CHECKBOX field - found inputs:', $inputs.length, 'allowed:', allowed);
-
-      $inputs.each(function () {
-        var $inp = $(this);
-        var val = String($inp.val());
-        var ok = allowed.indexOf(val) !== -1;
-
-        // Gravity Forms използва .gchoice wrapper, не <li>
-        var $wrapper = $inp.closest('.gchoice, li');
-
-        if (ok) {
-          $wrapper.show();
-        } else {
-          if ($inp.is(':checked')) {
-            $inp.prop('checked', false).trigger('change');
-          }
-          $wrapper.hide();
-        }
-      });
-      return;
-    }
-
-    console.warn('[GFCC] Field ' + fieldId + ' not found or unsupported type');
   }
 
-  function updateTarget(formCfg) {
-    var formId = formCfg.formId;
-    var mode = formCfg.mode || 'last_match';
+  function evaluateRule(formId, rule) {
+    var sourceValue = getFieldValue(formId, rule.fieldId);
+    var ruleValue = rule.value;
 
-    // DEBUG LOG
-    console.log('[GFCC] Updating targets for form ' + formId);
-
-    Object.keys(formCfg.targets || {}).forEach(function (tidStr) {
-      var targetId = parseInt(tidStr, 10);
-      var tcfg = formCfg.targets[tidStr];
-      var matched = null;
-
-      console.log('[GFCC] Processing target field ' + targetId);
-
-      (tcfg.groups || []).some(function (grp) {
-        if (!grp || grp.enabled === false) return false;
-
-        var logic = (String(grp.logicType || 'all').toLowerCase() === 'any') ? 'any' : 'all';
-        var rules = grp.rules || [];
-        var results = rules.map(function (rule) {
-          var fid = parseInt(rule.fieldId, 10);
-          var cur = getFieldValue(formId, fid);
-          console.log('[GFCC] Rule check: field ' + fid + ' value "' + cur + '" vs "' + rule.value + '" (operator: ' + rule.operator + ')');
-
-          if (rule.operator === 'isnot') {
-            return (cur !== String(rule.value));
-          } else {
-            return (cur === String(rule.value));
-          }
-        });
-
-        var groupMatch = (logic === 'all') ? results.every(Boolean) : results.some(Boolean);
-        console.log('[GFCC] Group match: ' + groupMatch, results);
-
-        if (groupMatch) {
-          var allowed = (grp.choices || []).map(function (v) { return String(v); });
-          var filtered = (tcfg.originalChoices || []).filter(function (ch) {
-            return allowed.indexOf(String(ch.value)) !== -1;
-          });
-
-          console.log('[GFCC] Matched! Applying ' + filtered.length + ' choices');
-          matched = filtered;
-          return (mode === 'first_match'); // прекъсни при first_match
+    // For operators that work on arrays (checkboxes)
+    if (Array.isArray(sourceValue)) {
+        switch (rule.operator) {
+            case 'is': // Check if any of the selected checkbox values match
+                return sourceValue.indexOf(ruleValue) > -1;
+            case 'isnot': // Check if none of the selected checkbox values match
+                return sourceValue.indexOf(ruleValue) === -1;
+            case 'contains': // Check if a specific choice is checked
+                 return sourceValue.indexOf(ruleValue) > -1;
+            default:
+                return false; // Other operators are not well-defined for arrays
         }
+    }
+
+    // For single-value fields
+    var numSource = parseFloat(sourceValue);
+    var numRule = parseFloat(ruleValue);
+
+    switch (rule.operator) {
+      case 'is':
+        return sourceValue === ruleValue;
+      case 'isnot':
+        return sourceValue !== ruleValue;
+      case '>':
+        return !isNaN(numSource) && !isNaN(numRule) && numSource > numRule;
+      case '<':
+        return !isNaN(numSource) && !isNaN(numRule) && numSource < numRule;
+      case 'contains':
+        return sourceValue.indexOf(ruleValue) > -1;
+      case 'starts_with':
+        return sourceValue.startsWith(ruleValue);
+      case 'ends_with':
+        return sourceValue.endsWith(ruleValue);
+      default:
         return false;
+    }
+  }
+
+  function updateTarget(formId, targetId, targetConfig) {
+    var matchedGroup = null;
+
+    // Find the first group that matches its rules
+    (targetConfig.groups || []).some(function(group) {
+      if (!group.enabled) return false;
+
+      var ruleResults = (group.rules || []).map(function(rule) {
+        return evaluateRule(formId, rule);
       });
 
-      var choicesToApply = matched || tcfg.originalChoices;
-      console.log('[GFCC] Final choices count: ' + choicesToApply.length);
-      applyChoices(formId, targetId, choicesToApply);
+      var isMatch = false;
+      if (ruleResults.length > 0) {
+          if (group.logicType === 'any') {
+            isMatch = ruleResults.some(function(res) { return res; });
+          } else { // 'all'
+            isMatch = ruleResults.every(function(res) { return res; });
+          }
+      }
+
+      if (isMatch) {
+        matchedGroup = group;
+        return true; // Stop searching
+      }
+      return false;
+    });
+
+    var choicesToApply = null;
+    if (matchedGroup) {
+      var allowedValues = matchedGroup.choices || [];
+      choicesToApply = targetConfig.originalChoices.filter(function(ch) {
+        return allowedValues.indexOf(String(ch.value)) > -1;
+      });
+    }
+    
+    applyChoices(formId, targetId, choicesToApply, targetConfig.originalChoices);
+  }
+
+  function runAllLogic(formId, formConfig) {
+    Object.keys(formConfig.targets || {}).forEach(function(targetId) {
+      updateTarget(formId, targetId, formConfig.targets[targetId]);
     });
   }
 
-  function bindForm(formCfg) {
-    var formId = formCfg.formId;
+  function bindForm(formId, formConfig) {
     var $root = $('#gform_' + formId);
+    if (!$root.length || $root.data('gfcc-bound')) {
+      return;
+    }
 
-    console.log('[GFCC] Binding form ' + formId, $root.length ? 'found' : 'NOT FOUND');
-
-    if (!$root.length) return;
-
-    // Първоначално прилагане
-    updateTarget(formCfg);
-
-    // Слушаме всички полета, използвани в правила
-    var boundKey = 'gfcc-bound';
-    var already = $root.data(boundKey) || {};
-
-    Object.keys(formCfg.targets || {}).forEach(function (tid) {
-      (formCfg.targets[tid].groups || []).forEach(function (grp) {
-        (grp.rules || []).forEach(function (rule) {
-          var fid = parseInt(rule.fieldId, 10);
-          if (already[fid]) return;
-          already[fid] = true;
-
-          console.log('[GFCC] Binding events for field ' + fid);
-
-          // text/select/textarea
-          $root.on('change.gfcc keyup.gfcc', '#input_' + formId + '_' + fid, function () {
-            console.log('[GFCC] Change detected on field ' + fid);
-            updateTarget(formCfg);
-          });
-
-          // radio - ПОПРАВЕН SELECTOR
-          $root.on('change.gfcc', 'input[name="input_' + formId + '_' + fid + '"]', function () {
-            console.log('[GFCC] Radio change detected on field ' + fid);
-            updateTarget(formCfg);
-          });
+    var sourceFields = new Set();
+    Object.keys(formConfig.targets || {}).forEach(function(targetId) {
+      (formConfig.targets[targetId].groups || []).forEach(function(group) {
+        (group.rules || []).forEach(function(rule) {
+          sourceFields.add(rule.fieldId);
         });
       });
     });
 
-    $root.data(boundKey, already);
-    console.log('[GFCC] Form ' + formId + ' fully bound');
+    var handler = function(e) {
+      // If the change was triggered by our own script, ignore it to prevent loops.
+      if ($(e.target).data('gfcc-internal-change')) {
+        return;
+      }
+      runAllLogic(formId, formConfig);
+    };
+
+    sourceFields.forEach(function(fieldId) {
+      // Standard inputs
+      $root.on('change.gfcc keyup.gfcc', '#input_' + formId + '_' + fieldId, handler);
+      // Radio and Checkbox fields
+      $root.on('change.gfcc', 'input[name^="input_' + fieldId + '"]', handler);
+    });
+
+    // Initial run
+    runAllLogic(formId, formConfig);
+
+    $root.data('gfcc-bound', true);
   }
 
-  // При всяко рендериране на форма (вкл. AJAX страници)
+  // GF uses this hook for multi-page forms and AJAX-enabled forms
   $(document).on('gform_post_render', function (e, formId) {
-    console.log('[GFCC] gform_post_render fired for form ' + formId);
-    if (!window.GFCC_FORMS) {
-      console.log('[GFCC] No GFCC_FORMS config found');
-      return;
-    }
-    var cfg = window.GFCC_FORMS[formId];
-    if (cfg) {
-      console.log('[GFCC] Config found, binding...');
-      bindForm(cfg);
-    } else {
-      console.log('[GFCC] No config for form ' + formId);
+    if (window.GFCC_FORMS && window.GFCC_FORMS[formId]) {
+      bindForm(formId, window.GFCC_FORMS[formId]);
     }
   });
 
-  // За случай, че скриптът се зареди след първоначалния render
+  // Fallback for forms that are already on the page when the script loads
   $(function () {
-    console.log('[GFCC] DOM ready, checking for forms...');
-    if (!window.GFCC_FORMS) {
-      console.log('[GFCC] No GFCC_FORMS config found on DOM ready');
-      return;
+    if (window.GFCC_FORMS) {
+      Object.keys(window.GFCC_FORMS).forEach(function (formId) {
+        bindForm(formId, window.GFCC_FORMS[formId]);
+      });
     }
-    console.log('[GFCC] Found configs:', Object.keys(window.GFCC_FORMS));
-
-    Object.keys(window.GFCC_FORMS).forEach(function (formId) {
-      var cfg = window.GFCC_FORMS[formId];
-      if (cfg) {
-        console.log('[GFCC] Binding form ' + formId + ' from DOM ready');
-        bindForm(cfg);
-      }
-    });
   });
 
 })(jQuery);

@@ -1,33 +1,33 @@
 <?php
 /**
- * Plugin Name: Gravity Forms - Conditional Choices V2 (Minimal Admin)
- * Description: Minimal admin UI to define "exact choices when condition matches". Saves config only. No frontend logic yet.
- * Version: 0.1.0
- * Author: CC
+ * Plugin Name: Gravity Forms - Conditional Choices V2
+ * Description: Define conditional choices for Gravity Forms fields.
+ * Version: 2.0.0
+ * Author: AI Assistant
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-class GFCC_V2_Admin {
+class GFCC_V2_Plugin {
 
-    const META_KEY = 'gfcc_config';
-    const AJAX_ACTION = 'gfcc_get_choices';
-    const NONCE_ACTION = 'gfcc_admin_nonce';
-    const SLUG = 'gfcc'; // form settings tab slug
+    const META_KEY = 'gfcc_config_v2';
+    const AJAX_ACTION = 'gfcc_v2_get_choices';
+    const NONCE_ACTION = 'gfcc_v2_admin_nonce';
+    const SLUG = 'gfcc_v2';
 
     public static function init() {
-        // Add a new tab in Form Settings
         add_filter( 'gform_form_settings_menu', [ __CLASS__, 'add_settings_tab' ], 10, 2 );
-        // Render that tab
         add_action( 'gform_form_settings_page_' . self::SLUG, [ __CLASS__, 'render_settings_page' ] );
-
-        // Enqueue admin assets only on our tab
         add_action( 'admin_enqueue_scripts', [ __CLASS__, 'enqueue_admin_assets' ] );
-
-        // AJAX: get choices for a field
         add_action( 'wp_ajax_' . self::AJAX_ACTION, [ __CLASS__, 'ajax_get_choices' ] );
+
+        // Frontend Hooks
+        add_action( 'gform_enqueue_scripts', [ __CLASS__, 'enqueue_frontend_scripts' ], 10, 2 );
+        add_filter( 'gform_pre_render', [ __CLASS__, 'apply_conditions_server_side' ], 100 );
+        add_filter( 'gform_pre_validation', [ __CLASS__, 'apply_conditions_server_side' ], 100 );
+        add_filter( 'gform_pre_submission_filter', [ __CLASS__, 'apply_conditions_server_side' ], 100 );
     }
 
     public static function add_settings_tab( $menu_items, $form_id ) {
@@ -40,19 +40,17 @@ class GFCC_V2_Admin {
     }
 
     public static function enqueue_admin_assets( $hook ) {
-        // Load only on the GF form settings page, our tab
-        if ( ! isset( $_GET['page'], $_GET['view'], $_GET['subview'], $_GET['id'] ) ) {
-            return;
-        }
-        if ( $_GET['page'] !== 'gf_edit_forms' || $_GET['view'] !== 'settings' || $_GET['subview'] !== self::SLUG ) {
+        if ( ! isset( $_GET['page'], $_GET['view'], $_GET['subview'], $_GET['id'] ) ||
+             $_GET['page'] !== 'gf_edit_forms' || $_GET['view'] !== 'settings' || $_GET['subview'] !== self::SLUG ) {
             return;
         }
 
+        wp_enqueue_style('gfcc-admin-css', plugin_dir_url(__FILE__) . 'css/admin.css', [], '2.0.0');
         wp_enqueue_script(
             'gfcc-admin',
             plugin_dir_url( __FILE__ ) . 'js/admin.js',
-            [ 'jquery' ],
-            '0.1.0',
+            [ 'jquery', 'jquery-ui-sortable' ],
+            '2.0.0',
             true
         );
 
@@ -64,248 +62,385 @@ class GFCC_V2_Admin {
             'strings'      => [
                 'loading' => __( 'Loading choices...', 'gfcc' ),
                 'error'   => __( 'Error loading choices.', 'gfcc' ),
+                'delete_rule' => __('Delete rule', 'gfcc'),
+                'delete_group' => __('Delete group', 'gfcc'),
+                'confirm_delete_group' => __('Are you sure you want to delete this condition group?', 'gfcc'),
+                'confirm_delete_target' => __('Are you sure you want to delete this entire configuration? This cannot be undone.', 'gfcc'),
             ],
         ] );
     }
 
-    public static function render_settings_page(  ) {
-        // Permission check: use GF capabilities if available, otherwise fall back.
-        $has_cap = false;
-        if ( class_exists( 'GFCommon' ) ) {
-            $has_cap = GFCommon::current_user_can_any( array( 'gform_full_access', 'gravityforms_edit_forms' ) );
-        } else {
-            // Fallback if GF classes aren't ready for some reason.
-            $has_cap = current_user_can( 'manage_options' );
+    public static function render_settings_page() {
+        if ( ! GFCommon::current_user_can_any( [ 'gravityforms_edit_forms' ] ) ) {
+            wp_die( 'You do not have permission to access this page.' );
         }
 
-        if ( ! $has_cap ) {
-            echo '<div class="notice notice-error"><p>' . esc_html__( 'You do not have permission to access this page.', 'gfcc' ) . '</p></div>';
-            return;
-        }
-
-        // Always output the standard GF header/footer for Form Settings pages
         GFFormSettings::page_header();
 
         $form_id = absint( rgget( 'id' ) );
+        $action = sanitize_text_field( rgget( 'action' ) );
+        $target_id = rgget( 'target_id' ); // Can be 'new' or an integer
 
+        self::handle_edit_page_actions($form_id, $target_id);
+
+        if ( $action === 'edit' && !empty($target_id) ) {
+            self::render_edit_page( $form_id, $target_id );
+        } else {
+            self::render_list_page( $form_id );
+        }
+
+        GFFormSettings::page_footer();
+    }
+
+    private static function render_list_page( $form_id ) {
         $form = GFAPI::get_form( $form_id );
+        $config = rgar( $form, self::META_KEY, [] );
+        $targets = $config['targets'] ?? [];
+        $base_url = admin_url( 'admin.php?page=gf_edit_forms&view=settings&subview=' . self::SLUG . '&id=' . $form_id );
 
-        if ( ! $form ) {
-            echo '<div class="notice notice-error"><p>' . esc_html__( 'Form not found.', 'gfcc' ) . '</p></div>';
-            GFFormSettings::page_footer();
-            return;
+        if ( isset( $_GET['deleted'] ) && $_GET['deleted'] === 'true' ) {
+            echo '<div class="notice notice-success is-dismissible"><p>' . esc_html__( 'Configuration deleted.', 'gfcc' ) . '</p></div>';
         }
-
-
-        // Load existing config
-        $config = rgar( $form, GFCC_V2_Admin::META_KEY );
-        if ( ! is_array( $config ) ) {
-            $config = [
-                'version' => 2,
-                'mode'    => 'last_match', // or first_match
-                'targets' => [],
-            ];
-        }
-
-        // Handle save
-        if ( isset( $_POST['gfcc_save'] ) ) {
-            check_admin_referer( self::NONCE_ACTION, 'gfcc_nonce' );
-
-            // Very minimal parsing for M1 (one target, one group, one rule)
-            $mode                 = in_array( $_POST['gfcc_mode'] ?? 'last_match', [ 'first_match', 'last_match' ], true ) ? $_POST['gfcc_mode'] : 'last_match';
-            $target_field_id      = absint( $_POST['gfcc_target_field'] ?? 0 );
-            $group_label          = sanitize_text_field( $_POST['gfcc_group_label'] ?? '' );
-            $rule_field_id        = absint( $_POST['gfcc_rule_field'] ?? 0 );
-            $rule_operator        = in_array( $_POST['gfcc_rule_operator'] ?? 'is', [ 'is', 'isnot' ], true ) ? $_POST['gfcc_rule_operator'] : 'is';
-            $rule_value           = isset( $_POST['gfcc_rule_value'] ) ? wp_unslash( $_POST['gfcc_rule_value'] ) : '';
-            $selected_choices_raw = isset( $_POST['gfcc_target_choices'] ) && is_array( $_POST['gfcc_target_choices'] ) ? $_POST['gfcc_target_choices'] : [];
-            $selected_choices     = array_values( array_filter( array_map( 'sanitize_text_field', $selected_choices_raw ), 'strlen' ) );
-
-            // Build minimal config
-            $new_targets = [];
-            if ( $target_field_id && $rule_field_id && ! empty( $selected_choices ) ) {
-                $new_targets[ (string) $target_field_id ] = [
-                    'enabled'  => true,
-                    'fallback' => [ 'type' => 'original', 'choices' => [] ],
-                    'groups'   => [
-                        [
-                            'id'        => uniqid( 'grp_', true ),
-                            'label'     => $group_label ?: 'Group 1',
-                            'enabled'   => true,
-                            'logicType' => 'all',
-                            'rules'     => [
-                                [
-                                    'fieldId'  => $rule_field_id,
-                                    'operator' => $rule_operator,
-                                    'value'    => (string) $rule_value,
-                                ],
-                            ],
-                            'choices'   => $selected_choices,
-                        ],
-                    ],
-                ];
-            }
-
-            $config['mode']    = $mode;
-            $config['targets'] = $new_targets;
-
-            $form = GFAPI::get_form( $form_id );
-            $form[ GFCC_V2_Admin::META_KEY ] = $config;
-
-            $result = GFAPI::update_form( $form );
-
+        if ( isset( $_GET['saved'] ) && $_GET['saved'] === 'true' ) {
             echo '<div class="notice notice-success is-dismissible"><p>' . esc_html__( 'Configuration saved.', 'gfcc' ) . '</p></div>';
-        }
-
-        // Reload (in case we just saved)
-        $form   = GFAPI::get_form( $form_id );
-        $config = rgar( $form, GFCC_V2_Admin::META_KEY );
-        if ( ! is_array( $config ) ) {
-            $config = [
-                'version' => 2,
-                'mode'    => 'last_match',
-                'targets' => [],
-            ];
-        }
-
-        $fields_all         = self::get_all_fields_list( $form );
-        $fields_with_choices= self::get_fields_with_choices_list( $form );
-
-        // Pre-fill UI from saved config (first/only target in M1)
-        $saved_mode          = $config['mode'] ?? 'last_match';
-        $saved_target_id     = 0;
-        $saved_group_label   = '';
-        $saved_rule_field    = 0;
-        $saved_rule_operator = 'is';
-        $saved_rule_value    = '';
-        $saved_choices       = [];
-
-        if ( ! empty( $config['targets'] ) ) {
-            $firstTargetKey   = array_key_first( $config['targets'] );
-            $targetCfg        = $config['targets'][ $firstTargetKey ];
-            $saved_target_id  = (int) $firstTargetKey;
-            if ( ! empty( $targetCfg['groups'] ) ) {
-                $grp                 = $targetCfg['groups'][0];
-                $saved_group_label   = $grp['label'] ?? '';
-                if ( ! empty( $grp['rules'] ) ) {
-                    $saved_rule_field    = (int) ( $grp['rules'][0]['fieldId'] ?? 0 );
-                    $saved_rule_operator = in_array( $grp['rules'][0]['operator'] ?? 'is', [ 'is', 'isnot' ], true ) ? $grp['rules'][0]['operator'] : 'is';
-                    $saved_rule_value    = (string) ( $grp['rules'][0]['value'] ?? '' );
-                }
-                $saved_choices = array_map( 'strval', $grp['choices'] ?? [] );
-            }
         }
 
         ?>
         <div class="wrap">
-            <h2><?php echo esc_html__( 'Conditional Choices', 'gfcc' ); ?></h2>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                <h2><?php esc_html_e( 'Conditional Choices Configurations', 'gfcc' ); ?></h2>
+                <a href="<?php echo esc_url( add_query_arg( [ 'action' => 'edit', 'target_id' => 'new' ], $base_url ) ); ?>" class="button button-primary button-hero">
+                    <?php esc_html_e( 'Add New', 'gfcc' ); ?>
+                </a>
+            </div>
 
-            <form method="post">
-                <?php wp_nonce_field( self::NONCE_ACTION, 'gfcc_nonce' ); ?>
-
-                <table class="form-table">
-                    <tbody>
+            <table class="wp-list-table widefat fixed striped">
+                <thead>
+                    <tr>
+                        <th scope="col" style="width: 40%;"><?php esc_html_e( 'Target Field', 'gfcc' ); ?></th>
+                        <th scope="col"><?php esc_html_e( 'ID', 'gfcc' ); ?></th>
+                        <th scope="col"><?php esc_html_e( 'Condition Groups', 'gfcc' ); ?></th>
+                        <th scope="col" style="width: 15%;"><?php esc_html_e( 'Actions', 'gfcc' ); ?></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php if ( empty( $targets ) ): ?>
                         <tr>
-                            <th scope="row"><label for="gfcc_mode"><?php esc_html_e( 'Mode', 'gfcc' ); ?></label></th>
-                            <td>
-                                <select name="gfcc_mode" id="gfcc_mode">
-                                    <option value="first_match" <?php selected( $saved_mode, 'first_match' ); ?>><?php esc_html_e( 'First match wins', 'gfcc' ); ?></option>
-                                    <option value="last_match"  <?php selected( $saved_mode, 'last_match' );  ?>><?php esc_html_e( 'Last match wins', 'gfcc' ); ?></option>
-                                </select>
-                                <p class="description"><?php esc_html_e( 'Evaluation strategy for multiple groups (future). For now, there is one group.', 'gfcc' ); ?></p>
-                            </td>
+                            <td colspan="4"><?php esc_html_e( 'No configurations found. Click "Add New" to get started.', 'gfcc' ); ?></td>
                         </tr>
-
-                        <tr>
-                            <th scope="row"><label for="gfcc_target_field"><?php esc_html_e( 'Target field', 'gfcc' ); ?></label></th>
-                            <td>
-                                <select name="gfcc_target_field" id="gfcc_target_field">
-                                    <option value=""><?php esc_html_e( '— Select —', 'gfcc' ); ?></option>
-                                    <?php foreach ( $fields_with_choices as $f ): ?>
-                                        <option value="<?php echo esc_attr( $f['id'] ); ?>" <?php selected( $saved_target_id, $f['id'] ); ?>>
-                                            <?php echo esc_html( $f['label'] . ' (#' . $f['id'] . ')' ); ?>
-                                        </option>
-                                    <?php endforeach; ?>
-                                </select>
-                                <p class="description"><?php esc_html_e( 'Field whose choices will be dynamically restricted.', 'gfcc' ); ?></p>
-                            </td>
-                        </tr>
-
-                        <tr>
-                            <th scope="row"><label for="gfcc_group_label"><?php esc_html_e( 'Group label', 'gfcc' ); ?></label></th>
-                            <td>
-                                <input type="text" name="gfcc_group_label" id="gfcc_group_label" class="regular-text" value="<?php echo esc_attr( $saved_group_label ); ?>" placeholder="<?php esc_attr_e( 'e.g. Retired user', 'gfcc' ); ?>">
-                                <p class="description"><?php esc_html_e( 'A friendly name for this condition group.', 'gfcc' ); ?></p>
-                            </td>
-                        </tr>
-
-                        <tr>
-                            <th scope="row"><?php esc_html_e( 'Rule (minimal M1)', 'gfcc' ); ?></th>
-                            <td>
-                                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-                                    <label for="gfcc_rule_field" class="screen-reader-text"><?php esc_html_e( 'Field', 'gfcc' ); ?></label>
-                                    <select name="gfcc_rule_field" id="gfcc_rule_field">
-                                        <option value=""><?php esc_html_e( '— Field —', 'gfcc' ); ?></option>
-                                        <?php foreach ( $fields_all as $f ): ?>
-                                            <option value="<?php echo esc_attr( $f['id'] ); ?>" <?php selected( $saved_rule_field, $f['id'] ); ?>>
-                                                <?php echo esc_html( $f['label'] . ' (#' . $f['id'] . ')' ); ?>
-                                            </option>
-                                        <?php endforeach; ?>
-                                    </select>
-
-                                    <label for="gfcc_rule_operator" class="screen-reader-text"><?php esc_html_e( 'Operator', 'gfcc' ); ?></label>
-                                    <select name="gfcc_rule_operator" id="gfcc_rule_operator">
-                                        <option value="is"    <?php selected( $saved_rule_operator, 'is' ); ?>><?php esc_html_e( 'is', 'gfcc' ); ?></option>
-                                        <option value="isnot" <?php selected( $saved_rule_operator, 'isnot' ); ?>><?php esc_html_e( 'is not', 'gfcc' ); ?></option>
-                                    </select>
-
-                                    <label for="gfcc_rule_value" class="screen-reader-text"><?php esc_html_e( 'Value', 'gfcc' ); ?></label>
-                                    <input type="text" name="gfcc_rule_value" id="gfcc_rule_value" value="<?php echo esc_attr( $saved_rule_value ); ?>" placeholder="<?php esc_attr_e( 'e.g. 1', 'gfcc' ); ?>">
-                                </div>
-                                <p class="description"><?php esc_html_e( 'Minimal rule for M1: one field, one operator, one value.', 'gfcc' ); ?></p>
-                            </td>
-                        </tr>
-
-                        <tr>
-                            <th scope="row"><label for="gfcc_target_choices"><?php esc_html_e( 'Choices to show when rule matches', 'gfcc' ); ?></label></th>
-                            <td>
-                                <select multiple name="gfcc_target_choices[]" id="gfcc_target_choices" style="min-width:260px; min-height:120px;">
-                                    <?php
-                                    // If we have a saved target and saved choices, try to pre-populate
-                                    if ( $saved_target_id ) {
-                                        $field = self::get_field_by_id( $form, $saved_target_id );
-                                        if ( $field && is_array( $field->choices ) ) {
-                                            foreach ( $field->choices as $ch ) {
-                                                $val = (string) ( $ch['value'] ?? $ch['text'] ?? '' );
-                                                if ( $val === '' ) continue;
-                                                printf(
-                                                    '<option value="%s" %s>%s</option>',
-                                                    esc_attr( $val ),
-                                                    selected( in_array( $val, $saved_choices, true ), true, false ),
-                                                    esc_html( $ch['text'] ?? $val )
-                                                );
-                                            }
-                                        }
-                                    }
-                                    ?>
-                                </select>
-                                <p class="description"><?php esc_html_e( 'Select exact choices to display when the above rule is true. Change the Target field to reload choices.', 'gfcc' ); ?></p>
-                            </td>
-                        </tr>
-                    </tbody>
-                </table>
-
-                <p class="submit">
-                    <button type="submit" name="gfcc_save" class="button button-primary"><?php esc_html_e( 'Save configuration', 'gfcc' ); ?></button>
-                </p>
-            </form>
-
-            <h3><?php esc_html_e( 'Current config (debug)', 'gfcc' ); ?></h3>
-            <textarea readonly rows="12" style="width:100%; font-family:monospace;"><?php echo esc_textarea( wp_json_encode( $config, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE ) ); ?></textarea>
+                    <?php else: ?>
+                        <?php foreach ( $targets as $tid => $tconfig ): ?>
+                            <?php
+                            $field = self::get_field_by_id( $form, $tid );
+                            $label = $field ? ($field->get_field_label(true, '') . " (#{$tid})") : sprintf(__( 'Field #%d (Not found)', 'gfcc' ), $tid);
+                            $edit_url = add_query_arg( [ 'action' => 'edit', 'target_id' => $tid ], $base_url );
+                            $delete_url = add_query_arg( [ 'action' => 'delete', 'target_id' => $tid, '_wpnonce' => wp_create_nonce( 'gfcc_delete_target_' . $tid ) ], $base_url );
+                            ?>
+                            <tr>
+                                <td><strong><a href="<?php echo esc_url( $edit_url ); ?>"><?php echo esc_html( $label ); ?></a></strong></td>
+                                <td><?php echo esc_html( $tid ); ?></td>
+                                <td><?php echo count( $tconfig['groups'] ?? [] ); ?></td>
+                                <td>
+                                    <a href="<?php echo esc_url( $edit_url ); ?>" class="button button-secondary"><?php esc_html_e( 'Edit', 'gfcc' ); ?></a>
+                                    <a href="<?php echo esc_url( $delete_url ); ?>" class="button button-link-delete" onclick="return confirm('<?php echo esc_js( __('Are you sure you want to delete this entire configuration? This cannot be undone.', 'gfcc') ); ?>');"><?php esc_html_e( 'Delete', 'gfcc' ); ?></a>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
+                </tbody>
+            </table>
         </div>
         <?php
+    }
 
-        GFFormSettings::page_footer();
+    private static function render_edit_page( $form_id, $target_id ) {
+        $form = GFAPI::get_form( $form_id );
+        $config = rgar( $form, self::META_KEY, [] );
+        $is_new = $target_id === 'new';
+
+        $current_target = null;
+        if (!$is_new) {
+            $current_target = $config['targets'][$target_id] ?? null;
+        }
+
+        if ( !$is_new && !$current_target ) {
+            echo '<div class="notice notice-error"><p>' . esc_html__( 'Configuration not found.', 'gfcc' ) . '</p></div>';
+            return;
+        }
+
+        $fields_all = self::get_all_fields_list( $form );
+        $fields_with_choices = self::get_fields_with_choices_list( $form );
+        $base_url = admin_url( 'admin.php?page=gf_edit_forms&view=settings&subview=' . self::SLUG . '&id=' . $form_id );
+
+        // Default structure for a new target
+        if ($is_new) {
+            $current_target = [
+                'enabled' => true,
+                'groups' => [
+                    [
+                        'id' => 'group_' . uniqid(),
+                        'label' => 'Condition Group 1',
+                        'enabled' => true,
+                        'logicType' => 'all',
+                        'rules' => [
+                            ['fieldId' => '', 'operator' => 'is', 'value' => '']
+                        ],
+                        'choices' => []
+                    ]
+                ]
+            ];
+        }
+
+        ?>
+        <div class="wrap gfcc-edit-page">
+            <h1 class="wp-heading-inline">
+                <?php $is_new ? esc_html_e( 'Add New Configuration', 'gfcc' ) : esc_html_e( 'Edit Configuration', 'gfcc' ); ?>
+            </h1>
+            <a href="<?php echo esc_url($base_url); ?>" class="page-title-action"><?php esc_html_e('Back to List', 'gfcc'); ?></a>
+            <hr class="wp-header-end">
+
+            <form method="post" id="gfcc_edit_form">
+                <input type="hidden" name="gfcc_form_id" value="<?php echo esc_attr($form_id); ?>">
+                <input type="hidden" name="gfcc_target_id_hidden" value="<?php echo esc_attr($target_id); ?>">
+                <?php wp_nonce_field( self::NONCE_ACTION, 'gfcc_nonce' ); ?>
+
+                <div id="poststuff">
+                    <div class="postbox">
+                        <h2 class="hndle"><?php esc_html_e('Target Field', 'gfcc'); ?></h2>
+                        <div class="inside">
+                            <p><?php esc_html_e('This is the field whose choices will be changed.', 'gfcc'); ?></p>
+                            <select name="gfcc_target_field_id" id="gfcc_target_field_selector" <?php echo !$is_new ? 'disabled' : ''; ?>>
+                                <option value=""><?php esc_html_e('— Select a Target Field —', 'gfcc'); ?></option>
+                                <?php foreach ($fields_with_choices as $f): ?>
+                                    <option value="<?php echo esc_attr($f['id']); ?>" <?php selected($is_new ? '' : $target_id, $f['id']); ?>>
+                                        <?php echo esc_html($f['label'] . ' (#' . $f['id'] . ')'); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                            <?php if (!$is_new): ?>
+                                <input type="hidden" name="gfcc_target_field_id" value="<?php echo esc_attr($target_id); ?>">
+                                <p class="description"><?php esc_html_e('The target field cannot be changed after creation.', 'gfcc'); ?></p>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+
+                    <div id="gfcc-groups-container" class="postbox">
+                        <h2 class="hndle"><?php esc_html_e('Condition Groups', 'gfcc'); ?></h2>
+                        <div class="inside">
+                            <p><?php esc_html_e('Define one or more groups of conditions. If the conditions in a group are met, the specified choices will be shown.', 'gfcc'); ?></p>
+                            <div class="gfcc-groups-wrapper">
+                                <?php foreach ($current_target['groups'] as $g_idx => $group): ?>
+                                    <?php self::render_group_template($g_idx, $group, $fields_all); ?>
+                                <?php endforeach; ?>
+                            </div>
+                            <button type="button" class="button" id="gfcc_add_group"><?php esc_html_e('Add Condition Group', 'gfcc'); ?></button>
+                        </div>
+                    </div>
+
+                     <div id="gfcc-choices-box" class="postbox" style="<?php echo $is_new ? 'display:none;' : ''; ?>">
+                        <h2 class="hndle"><?php esc_html_e('Available Choices', 'gfcc'); ?></h2>
+                        <div class="inside">
+                            <p><?php esc_html_e('These are the choices available for the selected target field. Drag them into the "Choices to Show" area in your condition groups.', 'gfcc'); ?></p>
+                            <ul id="gfcc-available-choices" class="gfcc-choices-list">
+                                <?php
+                                if (!$is_new) {
+                                    $target_field_obj = self::get_field_by_id($form, $target_id);
+                                    if ($target_field_obj && !empty($target_field_obj->choices)) {
+                                        foreach ($target_field_obj->choices as $choice) {
+                                            printf('<li data-value="%s">%s</li>', esc_attr($choice['value']), esc_html($choice['text']));
+                                        }
+                                    } else {
+                                        echo '<li>' . esc_html__('No choices found for this field.', 'gfcc') . '</li>';
+                                    }
+                                } else {
+                                     echo '<li>' . esc_html__('Select a target field to see available choices.', 'gfcc') . '</li>';
+                                }
+                                ?>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <p class="submit">
+                    <button type="submit" name="gfcc_save" class="button button-primary button-large"><?php esc_html_e( 'Save Configuration', 'gfcc' ); ?></button>
+                </p>
+            </form>
+        </div>
+
+        <!-- JS Templates -->
+        <script type="text/html" id="tmpl-gfcc-group">
+            <?php self::render_group_template('__GROUP_ID__', [], $fields_all); ?>
+        </script>
+        <script type="text/html" id="tmpl-gfcc-rule">
+            <?php self::render_rule_template('__GROUP_ID__', '__RULE_ID__', [], $fields_all); ?>
+        </script>
+        <?php
+    }
+
+    private static function render_group_template($g_idx, $group, $fields_all) {
+        $group_id = $group['id'] ?? 'group_' . uniqid();
+        $label = $group['label'] ?? 'New Condition Group';
+        $logic_type = $group['logicType'] ?? 'all';
+        $rules = $group['rules'] ?? [['fieldId' => '', 'operator' => 'is', 'value' => '']];
+        $choices = $group['choices'] ?? [];
+        ?>
+        <div class="gfcc-group postbox" data-group-id="<?php echo esc_attr($g_idx); ?>">
+            <input type="hidden" name="gfcc_config[groups][<?php echo esc_attr($g_idx); ?>][id]" value="<?php echo esc_attr($group_id); ?>">
+            <div class="handlediv" title="Click to toggle"><br></div>
+            <h3 class="hndle">
+                <span class="gfcc-group-label-text"><?php echo esc_html($label); ?></span>
+                <input type="text" name="gfcc_config[groups][<?php echo esc_attr($g_idx); ?>][label]" value="<?php echo esc_attr($label); ?>" class="gfcc-group-label-input" style="display:none;">
+                <button type="button" class="button-link gfcc-delete-group"><?php esc_html_e('Delete', 'gfcc'); ?></button>
+            </h3>
+            <div class="inside">
+                <div class="gfcc-group-logic">
+                    <strong><?php esc_html_e('Show choices in this group if', 'gfcc'); ?></strong>
+                    <select name="gfcc_config[groups][<?php echo esc_attr($g_idx); ?>][logicType]">
+                        <option value="all" <?php selected($logic_type, 'all'); ?>><?php esc_html_e('All', 'gfcc'); ?></option>
+                        <option value="any" <?php selected($logic_type, 'any'); ?>><?php esc_html_e('Any', 'gfcc'); ?></option>
+                    </select>
+                    <strong><?php esc_html_e('of the following rules match:', 'gfcc'); ?></strong>
+                </div>
+                <div class="gfcc-rules-wrapper">
+                    <?php foreach ($rules as $r_idx => $rule): ?>
+                        <?php self::render_rule_template($g_idx, $r_idx, $rule, $fields_all); ?>
+                    <?php endforeach; ?>
+                </div>
+                <button type="button" class="button gfcc-add-rule"><?php esc_html_e('Add Rule', 'gfcc'); ?></button>
+                <hr>
+                <div class="gfcc-group-choices">
+                    <strong><?php esc_html_e('Choices to Show:', 'gfcc'); ?></strong>
+                    <p class="description"><?php esc_html_e('Drag choices from the "Available Choices" box on the right.', 'gfcc'); ?></p>
+                    <ul class="gfcc-choices-list gfcc-assigned-choices">
+                        <?php foreach ($choices as $choice_val): ?>
+                            <li data-value="<?php echo esc_attr($choice_val); ?>">
+                                <?php echo esc_html($choice_val); // Note: We don't have the label here, just the value. JS will fix. ?>
+                                <input type="hidden" name="gfcc_config[groups][<?php echo esc_attr($g_idx); ?>][choices][]" value="<?php echo esc_attr($choice_val); ?>">
+                                <a href="#" class="gfcc-remove-choice">×</a>
+                            </li>
+                        <?php endforeach; ?>
+                    </ul>
+                </div>
+            </div>
+        </div>
+        <?php
+    }
+
+    private static function render_rule_template($g_idx, $r_idx, $rule, $fields_all) {
+        $field_id = $rule['fieldId'] ?? '';
+        $operator = $rule['operator'] ?? 'is';
+        $value = $rule['value'] ?? '';
+        ?>
+        <div class="gfcc-rule" data-rule-id="<?php echo esc_attr($r_idx); ?>">
+            <select name="gfcc_config[groups][<?php echo esc_attr($g_idx); ?>][rules][<?php echo esc_attr($r_idx); ?>][fieldId]">
+                <option value=""><?php esc_html_e('— Select Field —', 'gfcc'); ?></option>
+                <?php foreach ($fields_all as $f): ?>
+                    <option value="<?php echo esc_attr($f['id']); ?>" <?php selected($field_id, $f['id']); ?>>
+                        <?php echo esc_html($f['label'] . ' (#' . $f['id'] . ')'); ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+            <select name="gfcc_config[groups][<?php echo esc_attr($g_idx); ?>][rules][<?php echo esc_attr($r_idx); ?>][operator]">
+                <option value="is" <?php selected($operator, 'is'); ?>><?php esc_html_e('is', 'gfcc'); ?></option>
+                <option value="isnot" <?php selected($operator, 'isnot'); ?>><?php esc_html_e('is not', 'gfcc'); ?></option>
+                <option value=">" <?php selected($operator, '>'); ?>><?php esc_html_e('greater than', 'gfcc'); ?></option>
+                <option value="<" <?php selected($operator, '<'); ?>><?php esc_html_e('less than', 'gfcc'); ?></option>
+                <option value="contains" <?php selected($operator, 'contains'); ?>><?php esc_html_e('contains', 'gfcc'); ?></option>
+                <option value="starts_with" <?php selected($operator, 'starts_with'); ?>><?php esc_html_e('starts with', 'gfcc'); ?></option>
+                <option value="ends_with" <?php selected($operator, 'ends_with'); ?>><?php esc_html_e('ends with', 'gfcc'); ?></option>
+            </select>
+            <input type="text" name="gfcc_config[groups][<?php echo esc_attr($g_idx); ?>][rules][<?php echo esc_attr($r_idx); ?>][value]" value="<?php echo esc_attr($value); ?>" placeholder="<?php esc_attr_e('Value', 'gfcc'); ?>">
+            <button type="button" class="button-link button-link-delete gfcc-delete-rule">
+                <span class="dashicons dashicons-trash"></span>
+                <span class="screen-reader-text"><?php esc_html_e('Delete Rule', 'gfcc'); ?></span>
+            </button>
+        </div>
+        <?php
+    }
+
+    private static function handle_edit_page_actions($form_id, &$target_id) {
+        $base_url = admin_url( 'admin.php?page=gf_edit_forms&view=settings&subview=' . self::SLUG . '&id=' . $form_id );
+
+        // Handle Delete
+        if (isset($_GET['action']) && $_GET['action'] === 'delete' && isset($_GET['target_id']) && isset($_GET['_wpnonce'])) {
+            $tid_to_delete = sanitize_text_field($_GET['target_id']);
+            if (wp_verify_nonce($_GET['_wpnonce'], 'gfcc_delete_target_' . $tid_to_delete)) {
+                $form = GFAPI::get_form($form_id);
+                $config = rgar($form, self::META_KEY, []);
+                if (isset($config['targets'][$tid_to_delete])) {
+                    unset($config['targets'][$tid_to_delete]);
+                    $form[self::META_KEY] = $config;
+                    GFAPI::update_form($form);
+                    wp_redirect(add_query_arg(['deleted' => 'true'], $base_url));
+                    exit;
+                }
+            }
+        }
+
+        // Handle Save
+        if ( 'POST' === $_SERVER['REQUEST_METHOD'] && isset( $_POST['gfcc_save'] ) ) {
+            if ( ! isset( $_POST['gfcc_nonce'] ) || ! wp_verify_nonce( $_POST['gfcc_nonce'], self::NONCE_ACTION ) ) {
+                wp_die( 'Nonce verification failed.' );
+            }
+
+            $form = GFAPI::get_form($form_id);
+            $config = rgar($form, self::META_KEY, []);
+            if (!is_array($config)) $config = [];
+            if (!isset($config['targets'])) $config['targets'] = [];
+
+            $posted_tid = sanitize_text_field($_POST['gfcc_target_field_id']);
+            $posted_config = $_POST['gfcc_config'] ?? [];
+
+            if (empty($posted_tid)) {
+                 echo '<div class="notice notice-error is-dismissible"><p>' . esc_html__( 'Error: Target field is required.', 'gfcc' ) . '</p></div>';
+                 return;
+            }
+
+            $new_target_config = [
+                'enabled' => true,
+                'groups' => [],
+            ];
+
+            if (!empty($posted_config['groups'])) {
+                foreach ($posted_config['groups'] as $group_data) {
+                    $rules = [];
+                    if (!empty($group_data['rules'])) {
+                        foreach ($group_data['rules'] as $rule_data) {
+                            if (empty($rule_data['fieldId'])) continue;
+                            $rules[] = [
+                                'fieldId' => absint($rule_data['fieldId']),
+                                'operator' => sanitize_text_field($rule_data['operator']),
+                                'value' => wp_unslash(sanitize_text_field($rule_data['value'])),
+                            ];
+                        }
+                    }
+
+                    // Only add group if it has rules
+                    if (!empty($rules)) {
+                        $new_target_config['groups'][] = [
+                            'id' => sanitize_text_field($group_data['id']),
+                            'label' => sanitize_text_field($group_data['label']),
+                            'enabled' => true,
+                            'logicType' => sanitize_text_field($group_data['logicType']),
+                            'rules' => $rules,
+                            'choices' => array_map('sanitize_text_field', $group_data['choices'] ?? []),
+                        ];
+                    }
+                }
+            }
+
+            $config['targets'][$posted_tid] = $new_target_config;
+            $form[self::META_KEY] = $config;
+            $result = GFAPI::update_form($form);
+
+            if (is_wp_error($result)) {
+                echo '<div class="notice notice-error is-dismissible"><p>' . esc_html__( 'Error saving configuration: ', 'gfcc' ) . $result->get_error_message() . '</p></div>';
+            } else {
+                $redirect_url = add_query_arg(['action' => 'edit', 'target_id' => $posted_tid, 'saved' => 'true'], $base_url);
+                wp_redirect($redirect_url);
+                exit;
+            }
+        }
     }
 
     public static function ajax_get_choices() {
@@ -328,7 +463,6 @@ class GFCC_V2_Admin {
         $out = [];
         foreach ( $field->choices as $ch ) {
             $val = (string) ( $ch['value'] ?? $ch['text'] ?? '' );
-            if ( $val === '' ) continue;
             $out[] = [
                 'value' => $val,
                 'text'  => (string) ( $ch['text'] ?? $val ),
@@ -337,45 +471,192 @@ class GFCC_V2_Admin {
         wp_send_json_success( [ 'choices' => $out ] );
     }
 
+    // Frontend Logic
+    public static function enqueue_frontend_scripts( $form, $is_ajax ) {
+        $config = rgar( $form, self::META_KEY );
+        if ( ! is_array( $config ) || empty( $config['targets'] ) ) {
+            return;
+        }
+
+        $form_id = (int) $form['id'];
+        $data = [
+            'formId'  => $form_id,
+            'targets' => [],
+        ];
+
+        foreach ( $config['targets'] as $target_id => $target_cfg ) {
+            if ( empty( $target_cfg['enabled'] ) ) continue;
+
+            $field_obj = self::get_field_by_id($form, $target_id);
+            if ( !$field_obj ) continue;
+
+            $orig_choices = [];
+            if (is_array($field_obj->choices)) {
+                foreach ($field_obj->choices as $ch) {
+                    $orig_choices[] = ['value' => $ch['value'] ?? '', 'text' => $ch['text'] ?? ''];
+                }
+            }
+
+            $data['targets'][ (int)$target_id ] = [
+                'groups'          => $target_cfg['groups'],
+                'originalChoices' => $orig_choices,
+            ];
+        }
+
+        if (empty($data['targets'])) return;
+
+        $script_handle = 'gfcc-frontend';
+        if ( ! wp_script_is( $script_handle, 'enqueued' ) ) {
+            wp_enqueue_script(
+                $script_handle,
+                plugin_dir_url( __FILE__ ) . 'js/frontend.js',
+                [ 'jquery' ],
+                '2.0.0',
+                true
+            );
+        }
+
+        $inline_script = sprintf(
+            'window.GFCC_FORMS = window.GFCC_FORMS || {}; window.GFCC_FORMS[%d] = %s;',
+            $form_id,
+            wp_json_encode( $data )
+        );
+        wp_add_inline_script( $script_handle, $inline_script, 'before' );
+    }
+
+    public static function apply_conditions_server_side( $form ) {
+        $config = rgar( $form, self::META_KEY );
+        if ( ! is_array( $config ) || empty( $config['targets'] ) ) {
+            return $form;
+        }
+    
+        foreach ( $config['targets'] as $target_field_id => $target_cfg ) {
+            if ( empty( $target_cfg['enabled'] ) || empty( $target_cfg['groups'] ) ) {
+                continue;
+            }
+    
+            $target_field = self::get_field_by_id( $form, $target_field_id );
+            if ( ! $target_field ) {
+                continue;
+            }
+    
+            $original_choices = $target_field->choices;
+            $matched_choices  = null;
+    
+            foreach ( $target_cfg['groups'] as $group ) {
+                if ( empty( $group['enabled'] ) || empty( $group['rules'] ) ) {
+                    continue;
+                }
+    
+                $group_match = self::evaluate_group_rules( $group['rules'], rgar( $group, 'logicType', 'all' ) );
+    
+                if ( $group_match ) {
+                    $allowed_values = array_map( 'strval', (array) rgar( $group, 'choices', [] ) );
+                    $filtered         = [];
+                    foreach ( $original_choices as $ch ) {
+                        if ( in_array( (string) $ch['value'], $allowed_values, true ) ) {
+                            $filtered[] = $ch;
+                        }
+                    }
+                    // For now, we only support one group match. 'first_match' is implied.
+                    $matched_choices = $filtered;
+                    break; 
+                }
+            }
+    
+            if ( $matched_choices !== null ) {
+                $target_field->choices = $matched_choices;
+            }
+        }
+    
+        return $form;
+    }
+
+    private static function evaluate_group_rules( $rules, $logic_type = 'all' ) {
+        $logic_type = strtolower( $logic_type ) === 'any' ? 'any' : 'all';
+        $results = [];
+    
+        foreach ( $rules as $rule ) {
+            $field_id = (int) ( $rule['fieldId'] ?? 0 );
+            $operator = $rule['operator'] ?? 'is';
+            $value    = (string) ( $rule['value'] ?? '' );
+    
+            if ( ! $field_id ) {
+                $results[] = false;
+                continue;
+            }
+    
+            $submitted_value = self::get_submitted_value( $field_id );
+            $match = false;
+    
+            switch ( $operator ) {
+                case 'is':
+                    $match = $submitted_value === $value;
+                    break;
+                case 'isnot':
+                    $match = $submitted_value !== $value;
+                    break;
+                case '>':
+                    $match = is_numeric($submitted_value) && is_numeric($value) && (float)$submitted_value > (float)$value;
+                    break;
+                case '<':
+                    $match = is_numeric($submitted_value) && is_numeric($value) && (float)$submitted_value < (float)$value;
+                    break;
+                case 'contains':
+                    $match = strpos($submitted_value, $value) !== false;
+                    break;
+                case 'starts_with':
+                    $match = strpos($submitted_value, $value) === 0;
+                    break;
+                case 'ends_with':
+                    $match = substr($submitted_value, -strlen($value)) === $value;
+                    break;
+            }
+            $results[] = $match;
+        }
+    
+        if ( empty($results) ) return false;
+        $is_match = $logic_type === 'all' ? !in_array(false, $results, true) : in_array(true, $results, true);
+        return $is_match;
+    }
+    
+    private static function get_submitted_value( $field_id ) {
+        $input_name = 'input_' . $field_id;
+        if ( isset( $_POST[ $input_name ] ) ) {
+            $val = $_POST[ $input_name ];
+            return is_array($val) ? (string)reset($val) : (string)$val;
+        }
+        return '';
+    }
+
+
+    // Helper Functions
     private static function get_all_fields_list( $form ) {
         $out = [];
-        if ( empty( $form['fields'] ) ) {
-            return $out;
-        }
+        if ( empty( $form['fields'] ) ) return $out;
         foreach ( $form['fields'] as $f ) {
             if ( ! is_object( $f ) ) continue;
             $label = method_exists( $f, 'get_field_label' ) ? $f->get_field_label( true, '' ) : ( $f->label ?? 'Field' );
-            $out[] = [
-                'id'    => (int) $f->id,
-                'label' => $label,
-            ];
+            $out[] = ['id' => (int) $f->id, 'label' => $label];
         }
         return $out;
     }
 
     private static function get_fields_with_choices_list( $form ) {
         $out = [];
-
-        if ( empty( $form['fields'] ) ) {
-            return $out;
-        }
+        if ( empty( $form['fields'] ) ) return $out;
         foreach ( $form['fields'] as $f ) {
             if ( ! is_object( $f ) ) continue;
             if ( isset( $f->choices ) && is_array( $f->choices ) && ! empty( $f->choices ) ) {
                 $label = method_exists( $f, 'get_field_label' ) ? $f->get_field_label( true, '' ) : ( $f->label ?? 'Field' );
-                $out[] = [
-                    'id'    => (int) $f->id,
-                    'label' => $label,
-                ];
+                $out[] = ['id' => (int) $f->id, 'label' => $label];
             }
         }
         return $out;
     }
 
     private static function get_field_by_id( $form, $field_id ) {
-        if ( empty( $form['fields'] ) ) {
-            return null;
-        }
+        if ( empty( $form['fields'] ) ) return null;
         foreach ( $form['fields'] as $f ) {
             if ( is_object( $f ) && (int) $f->id === (int) $field_id ) {
                 return $f;
@@ -387,254 +668,6 @@ class GFCC_V2_Admin {
 
 add_action( 'gform_loaded', function() {
     if ( class_exists( 'GFForms' ) ) {
-        GFCC_V2_Admin::init();
+        GFCC_V2_Plugin::init();
     }
 }, 5 );
-
-
-add_filter( 'gform_pre_render', 'gfcc_apply_conditional_choices', 100 );
-add_filter( 'gform_pre_validation', 'gfcc_apply_conditional_choices', 100 );
-add_filter( 'gform_pre_submission_filter', 'gfcc_apply_conditional_choices', 100 );
-function gfcc_apply_conditional_choices( $form ) {
-    if ( empty( $form['id'] ) ) {
-        return $form;
-    }
-
-    // ВЗЕМИ КОНФИГА ДИРЕКТНО ОТ $form, а не от БД
-    $config = rgar( $form, GFCC_V2_Admin::META_KEY );
-    if ( ! is_array( $config ) || empty( $config['targets'] ) ) {
-        return $form;
-    }
-
-    $mode    = rgar( $config, 'mode', 'last_match' );
-    $targets = rgar( $config, 'targets', [] );
-
-    foreach ( $targets as $target_field_id => $target_cfg ) {
-        $target_field_id = (int) $target_field_id;
-
-        if ( empty( $target_cfg['enabled'] ) || empty( $target_cfg['groups'] ) ) {
-            continue;
-        }
-
-        // Намери target полето (поддържай обект и масив)
-        $target_field_index = null;
-        foreach ( $form['fields'] as $idx => $field_obj ) {
-            $fid = is_object( $field_obj ) ? (int) $field_obj->id : (int) rgar( $field_obj, 'id' );
-            if ( $fid === $target_field_id ) {
-                $target_field_index = $idx;
-                break;
-            }
-        }
-        if ( $target_field_index === null ) {
-            continue;
-        }
-
-        $original_field   = $form['fields'][ $target_field_index ];
-        $original_choices = is_object( $original_field ) ? rgar( (array) $original_field, 'choices' ) : rgar( $original_field, 'choices' );
-
-        if ( ! is_array( $original_choices ) ) {
-            continue;
-        }
-
-        $matched_choices = null;
-
-        foreach ( $target_cfg['groups'] as $group ) {
-            if ( empty( $group['enabled'] ) || empty( $group['rules'] ) || empty( $group['choices'] ) ) {
-                continue;
-            }
-
-            $group_match = gfcc_evaluate_group_rules( $form, $group['rules'], rgar( $group, 'logicType', 'all' ) );
-
-            if ( $group_match ) {
-                $allowed_values = array_map( 'strval', (array) rgar( $group, 'choices', [] ) );
-
-                $filtered = [];
-                foreach ( $original_choices as $ch ) {
-                    $val = (string) ( rgar( $ch, 'value' ) !== null ? $ch['value'] : rgar( $ch, 'text', '' ) );
-                    if ( $val === '' ) {
-                        continue;
-                    }
-                    if ( in_array( $val, $allowed_values, true ) ) {
-                        $filtered[] = $ch;
-                    }
-                }
-
-                if ( $mode === 'first_match' ) {
-                    $matched_choices = $filtered;
-                    break;
-                } else {
-                    $matched_choices = $filtered; // last_match
-                }
-            }
-        }
-
-        // Задай обратно към формата (обект/масив)
-        if ( $matched_choices !== null ) {
-            if ( is_object( $form['fields'][ $target_field_index ] ) ) {
-                $form['fields'][ $target_field_index ]->choices = $matched_choices;
-            } else {
-                $form['fields'][ $target_field_index ]['choices'] = $matched_choices;
-            }
-        } else {
-            // fallback: оригинални
-            if ( is_object( $form['fields'][ $target_field_index ] ) ) {
-                $form['fields'][ $target_field_index ]->choices = $original_choices;
-            } else {
-                $form['fields'][ $target_field_index ]['choices'] = $original_choices;
-            }
-        }
-    }
-
-    return $form;
-}
-
-/**
- * Оценява набор от правила за дадена група.
- * M1: поддържаме operator-и 'is' и 'isnot' върху стойността на друго поле.
- */
-function gfcc_evaluate_group_rules( $form, $rules, $logic_type = 'all' ) {
-    if ( ! is_array( $rules ) || empty( $rules ) ) {
-        return false;
-    }
-
-    $logic_type = strtolower( $logic_type ) === 'any' ? 'any' : 'all';
-
-    $results = [];
-
-    foreach ( $rules as $rule ) {
-        $field_id = (int) ( $rule['fieldId'] ?? 0 );
-        $operator = $rule['operator'] ?? 'is';
-        $value    = (string) ( $rule['value'] ?? '' );
-
-        if ( ! $field_id ) {
-            $results[] = false;
-            continue;
-        }
-
-        $current = gfcc_get_submitted_value( $form, $field_id );
-
-        switch ( $operator ) {
-            case 'is':
-                $match = (string) $current === $value;
-                break;
-            case 'isnot':
-                $match = (string) $current !== $value;
-                break;
-            default:
-                $match = false;
-        }
-
-        $results[] = $match;
-    }
-
-    if ( $logic_type === 'all' ) {
-        foreach ( $results as $r ) {
-            if ( ! $r ) {
-                return false;
-            }
-        }
-        return true;
-    } else {
-        foreach ( $results as $r ) {
-            if ( $r ) {
-                return true;
-            }
-        }
-        return false;
-    }
-}
-
-/**
- * Взимаме текущата стойност на поле от $_POST (basic).
- * Може да се подобри за сложни полета, но за M1 стига.
- */
-function gfcc_get_submitted_value( $form, $field_id ) {
-    $input_name = 'input_' . (int) $field_id;
-
-    // 1) POST (submit)
-    if ( null !== ( $v = rgpost( $input_name ) ) ) {
-        return is_array( $v ) ? (string) reset( $v ) : (string) $v;
-    }
-
-    // 2) GET (позволява тестване с ?input_1=x)
-    if ( null !== ( $v = rgget( $input_name ) ) ) {
-        return is_array( $v ) ? (string) reset( $v ) : (string) $v;
-    }
-
-    // 3) По подразбиране: празно
-    return '';
-}
-
-// Замени съществуващата gfcc_enqueue_frontend функция с тази:
-
-add_action( 'gform_enqueue_scripts', 'gfcc_enqueue_frontend', 10, 2 );
-function gfcc_enqueue_frontend( $form, $is_ajax ) {
-    $config = rgar( $form, GFCC_V2_Admin::META_KEY );
-    if ( ! is_array( $config ) || empty( $config['targets'] ) ) {
-        return;
-    }
-
-    $form_id = (int) $form['id'];
-
-    // Подготви данните
-    $data = [
-        'formId'  => $form_id,
-        'mode'    => rgar( $config, 'mode', 'last_match' ),
-        'targets' => [],
-    ];
-
-    foreach ( $config['targets'] as $target_id => $target_cfg ) {
-        if ( empty( $target_cfg['enabled'] ) ) {
-            continue;
-        }
-        $target_id = (int) $target_id;
-
-        // Намери target полето
-        $field_obj = null;
-        foreach ( $form['fields'] as $f ) {
-            $fid = is_object( $f ) ? (int) $f->id : (int) rgar( $f, 'id' );
-            if ( $fid === $target_id ) {
-                $field_obj = $f;
-                break;
-            }
-        }
-        if ( ! $field_obj ) continue;
-
-        $choices = is_object( $field_obj ) ? rgar( (array) $field_obj, 'choices', [] ) : rgar( $field_obj, 'choices', [] );
-        $orig = [];
-        if ( is_array( $choices ) ) {
-            foreach ( $choices as $ch ) {
-                $val = (string) ( isset( $ch['value'] ) ? $ch['value'] : ( isset( $ch['text'] ) ? $ch['text'] : '' ) );
-                if ( $val === '' ) continue;
-                $orig[] = [
-                    'value' => $val,
-                    'text'  => (string) rgar( $ch, 'text', $val ),
-                ];
-            }
-        }
-
-        $data['targets'][ $target_id ] = [
-            'groups'          => $target_cfg['groups'],
-            'originalChoices' => $orig,
-        ];
-    }
-
-    // Първо: Регистрираме глобалната променлива
-    $inline_before = 'window.GFCC_FORMS = window.GFCC_FORMS || {};
-window.GFCC_FORMS[' . $form_id . '] = ' . wp_json_encode( $data ) . ';
-console.log("[GFCC PHP] Config registered for form ' . $form_id . '", window.GFCC_FORMS[' . $form_id . ']);';
-
-    // Проверка дали вече не е enqueue-нат глобално
-    if ( ! wp_script_is( 'gfcc-frontend', 'enqueued' ) ) {
-        wp_enqueue_script(
-            'gfcc-frontend',
-            plugin_dir_url( __FILE__ ) . 'js/frontend.js',
-            [ 'jquery' ],
-            '0.1.2', // Инкрементирай версията
-            true
-        );
-    }
-
-    // Инжектираме config-а ПРЕДИ скрипта
-    wp_add_inline_script( 'gfcc-frontend', $inline_before, 'before' );
-}
