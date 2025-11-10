@@ -98,7 +98,7 @@ class GFCC_V2_Admin {
 
 
         // Load existing config
-        $config = GFFormsModel::get_form_meta( $form_id, self::META_KEY );
+        $config = rgar( $form, GFCC_V2_Admin::META_KEY );
         if ( ! is_array( $config ) ) {
             $config = [
                 'version' => 2,
@@ -149,13 +149,17 @@ class GFCC_V2_Admin {
             $config['mode']    = $mode;
             $config['targets'] = $new_targets;
 
-            GFFormsModel::update_form_meta( $form_id, self::META_KEY, $config );
+            $form = GFAPI::get_form( $form_id );
+            $form[ GFCC_V2_Admin::META_KEY ] = $config;
+
+            $result = GFAPI::update_form( $form );
 
             echo '<div class="notice notice-success is-dismissible"><p>' . esc_html__( 'Configuration saved.', 'gfcc' ) . '</p></div>';
         }
 
         // Reload (in case we just saved)
-        $config = GFFormsModel::get_form_meta( $form_id, self::META_KEY );
+        $form   = GFAPI::get_form( $form_id );
+        $config = rgar( $form, GFCC_V2_Admin::META_KEY );
         if ( ! is_array( $config ) ) {
             $config = [
                 'version' => 2,
@@ -386,3 +390,165 @@ add_action( 'gform_loaded', function() {
         GFCC_V2_Admin::init();
     }
 }, 5 );
+
+add_filter( 'gform_pre_render', 'gfcc_apply_conditional_choices' );
+add_filter( 'gform_pre_validation', 'gfcc_apply_conditional_choices' );
+function gfcc_apply_conditional_choices( $form ) {
+
+    if ( empty( $form['id'] ) ) {
+        return $form;
+    }
+
+
+    if ( ! is_array( $config ) || empty( $config['targets'] ) ) {
+        return $form;
+    }
+
+    $mode    = $config['mode'] ?? 'last_match';
+    $targets = $config['targets'];
+
+    // За M1: минаваме по всички target-и, които имаме
+    foreach ( $targets as $target_field_id => $target_cfg ) {
+
+        $target_field_id = (int) $target_field_id;
+
+        if ( empty( $target_cfg['enabled'] ) || empty( $target_cfg['groups'] ) ) {
+            continue;
+        }
+
+        // Намираме target полето в формата
+        $target_field_index = null;
+        foreach ( $form['fields'] as $idx => $field_obj ) {
+            if ( is_object( $field_obj ) && (int) $field_obj->id === $target_field_id ) {
+                $target_field_index = $idx;
+                break;
+            }
+        }
+        if ( $target_field_index === null ) {
+            continue;
+        }
+
+        $original_field = $form['fields'][ $target_field_index ];
+        if ( ! isset( $original_field->choices ) || ! is_array( $original_field->choices ) ) {
+            continue;
+        }
+
+        // Държим оригиналните choices отделно
+        $original_choices = $original_field->choices;
+
+        $matched_choices = null;
+
+        // За M1 имаме една група, но ще го напишем генерализирано
+        foreach ( $target_cfg['groups'] as $group ) {
+
+            if ( empty( $group['enabled'] ) || empty( $group['rules'] ) || empty( $group['choices'] ) ) {
+                continue;
+            }
+
+            $group_match = gfcc_evaluate_group_rules( $form, $group['rules'], $group['logicType'] ?? 'all' );
+
+            if ( $group_match ) {
+                // От choices (масив от values) правим филтриран списък само с тези value-та
+                $allowed_values = array_map( 'strval', $group['choices'] );
+
+                $filtered = [];
+                foreach ( $original_choices as $ch ) {
+                    $val = (string) ( $ch['value'] ?? $ch['text'] ?? '' );
+                    if ( in_array( $val, $allowed_values, true ) ) {
+                        $filtered[] = $ch;
+                    }
+                }
+
+                if ( $mode === 'first_match' ) {
+                    $matched_choices = $filtered;
+                    break;
+                } else {
+                    // last_match: overwrite, но продължаваме да търсим
+                    $matched_choices = $filtered;
+                }
+            }
+        }
+
+        // Прикрепяме резултата към формата
+        if ( $matched_choices !== null ) {
+            $form['fields'][ $target_field_index ]->choices = $matched_choices;
+        } else {
+            // fallback -> original (както е конфиг в M1)
+            $form['fields'][ $target_field_index ]->choices = $original_choices;
+        }
+    }
+
+    return $form;
+}
+
+/**
+ * Оценява набор от правила за дадена група.
+ * M1: поддържаме operator-и 'is' и 'isnot' върху стойността на друго поле.
+ */
+function gfcc_evaluate_group_rules( $form, $rules, $logic_type = 'all' ) {
+    if ( ! is_array( $rules ) || empty( $rules ) ) {
+        return false;
+    }
+
+    $logic_type = strtolower( $logic_type ) === 'any' ? 'any' : 'all';
+
+    $results = [];
+
+    foreach ( $rules as $rule ) {
+        $field_id = (int) ( $rule['fieldId'] ?? 0 );
+        $operator = $rule['operator'] ?? 'is';
+        $value    = (string) ( $rule['value'] ?? '' );
+
+        if ( ! $field_id ) {
+            $results[] = false;
+            continue;
+        }
+
+        $current = gfcc_get_submitted_value( $form, $field_id );
+
+        switch ( $operator ) {
+            case 'is':
+                $match = (string) $current === $value;
+                break;
+            case 'isnot':
+                $match = (string) $current !== $value;
+                break;
+            default:
+                $match = false;
+        }
+
+        $results[] = $match;
+    }
+
+    if ( $logic_type === 'all' ) {
+        foreach ( $results as $r ) {
+            if ( ! $r ) {
+                return false;
+            }
+        }
+        return true;
+    } else {
+        foreach ( $results as $r ) {
+            if ( $r ) {
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
+/**
+ * Взимаме текущата стойност на поле от $_POST (basic).
+ * Може да се подобри за сложни полета, но за M1 стига.
+ */
+function gfcc_get_submitted_value( $form, $field_id ) {
+    $input_name = 'input_' . $field_id;
+
+    if ( isset( $_POST[ $input_name ] ) ) {
+        return is_array( $_POST[ $input_name ] )
+            ? reset( $_POST[ $input_name ] )
+            : wp_unslash( $_POST[ $input_name ] );
+    }
+
+    return '';
+}
