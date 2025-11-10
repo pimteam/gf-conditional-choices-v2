@@ -391,35 +391,36 @@ add_action( 'gform_loaded', function() {
     }
 }, 5 );
 
-add_filter( 'gform_pre_render', 'gfcc_apply_conditional_choices' );
-add_filter( 'gform_pre_validation', 'gfcc_apply_conditional_choices' );
-function gfcc_apply_conditional_choices( $form ) {
 
+add_filter( 'gform_pre_render', 'gfcc_apply_conditional_choices', 100 );
+add_filter( 'gform_pre_validation', 'gfcc_apply_conditional_choices', 100 );
+add_filter( 'gform_pre_submission_filter', 'gfcc_apply_conditional_choices', 100 );
+function gfcc_apply_conditional_choices( $form ) {
     if ( empty( $form['id'] ) ) {
         return $form;
     }
 
-
+    // ВЗЕМИ КОНФИГА ДИРЕКТНО ОТ $form, а не от БД
+    $config = rgar( $form, GFCC_V2_Admin::META_KEY );
     if ( ! is_array( $config ) || empty( $config['targets'] ) ) {
         return $form;
     }
 
-    $mode    = $config['mode'] ?? 'last_match';
-    $targets = $config['targets'];
+    $mode    = rgar( $config, 'mode', 'last_match' );
+    $targets = rgar( $config, 'targets', [] );
 
-    // За M1: минаваме по всички target-и, които имаме
     foreach ( $targets as $target_field_id => $target_cfg ) {
-
         $target_field_id = (int) $target_field_id;
 
         if ( empty( $target_cfg['enabled'] ) || empty( $target_cfg['groups'] ) ) {
             continue;
         }
 
-        // Намираме target полето в формата
+        // Намери target полето (поддържай обект и масив)
         $target_field_index = null;
         foreach ( $form['fields'] as $idx => $field_obj ) {
-            if ( is_object( $field_obj ) && (int) $field_obj->id === $target_field_id ) {
+            $fid = is_object( $field_obj ) ? (int) $field_obj->id : (int) rgar( $field_obj, 'id' );
+            if ( $fid === $target_field_id ) {
                 $target_field_index = $idx;
                 break;
             }
@@ -428,32 +429,31 @@ function gfcc_apply_conditional_choices( $form ) {
             continue;
         }
 
-        $original_field = $form['fields'][ $target_field_index ];
-        if ( ! isset( $original_field->choices ) || ! is_array( $original_field->choices ) ) {
+        $original_field   = $form['fields'][ $target_field_index ];
+        $original_choices = is_object( $original_field ) ? rgar( (array) $original_field, 'choices' ) : rgar( $original_field, 'choices' );
+
+        if ( ! is_array( $original_choices ) ) {
             continue;
         }
 
-        // Държим оригиналните choices отделно
-        $original_choices = $original_field->choices;
-
         $matched_choices = null;
 
-        // За M1 имаме една група, но ще го напишем генерализирано
         foreach ( $target_cfg['groups'] as $group ) {
-
             if ( empty( $group['enabled'] ) || empty( $group['rules'] ) || empty( $group['choices'] ) ) {
                 continue;
             }
 
-            $group_match = gfcc_evaluate_group_rules( $form, $group['rules'], $group['logicType'] ?? 'all' );
+            $group_match = gfcc_evaluate_group_rules( $form, $group['rules'], rgar( $group, 'logicType', 'all' ) );
 
             if ( $group_match ) {
-                // От choices (масив от values) правим филтриран списък само с тези value-та
-                $allowed_values = array_map( 'strval', $group['choices'] );
+                $allowed_values = array_map( 'strval', (array) rgar( $group, 'choices', [] ) );
 
                 $filtered = [];
                 foreach ( $original_choices as $ch ) {
-                    $val = (string) ( $ch['value'] ?? $ch['text'] ?? '' );
+                    $val = (string) ( rgar( $ch, 'value' ) !== null ? $ch['value'] : rgar( $ch, 'text', '' ) );
+                    if ( $val === '' ) {
+                        continue;
+                    }
                     if ( in_array( $val, $allowed_values, true ) ) {
                         $filtered[] = $ch;
                     }
@@ -463,18 +463,25 @@ function gfcc_apply_conditional_choices( $form ) {
                     $matched_choices = $filtered;
                     break;
                 } else {
-                    // last_match: overwrite, но продължаваме да търсим
-                    $matched_choices = $filtered;
+                    $matched_choices = $filtered; // last_match
                 }
             }
         }
 
-        // Прикрепяме резултата към формата
+        // Задай обратно към формата (обект/масив)
         if ( $matched_choices !== null ) {
-            $form['fields'][ $target_field_index ]->choices = $matched_choices;
+            if ( is_object( $form['fields'][ $target_field_index ] ) ) {
+                $form['fields'][ $target_field_index ]->choices = $matched_choices;
+            } else {
+                $form['fields'][ $target_field_index ]['choices'] = $matched_choices;
+            }
         } else {
-            // fallback -> original (както е конфиг в M1)
-            $form['fields'][ $target_field_index ]->choices = $original_choices;
+            // fallback: оригинални
+            if ( is_object( $form['fields'][ $target_field_index ] ) ) {
+                $form['fields'][ $target_field_index ]->choices = $original_choices;
+            } else {
+                $form['fields'][ $target_field_index ]['choices'] = $original_choices;
+            }
         }
     }
 
@@ -542,13 +549,92 @@ function gfcc_evaluate_group_rules( $form, $rules, $logic_type = 'all' ) {
  * Може да се подобри за сложни полета, но за M1 стига.
  */
 function gfcc_get_submitted_value( $form, $field_id ) {
-    $input_name = 'input_' . $field_id;
+    $input_name = 'input_' . (int) $field_id;
 
-    if ( isset( $_POST[ $input_name ] ) ) {
-        return is_array( $_POST[ $input_name ] )
-            ? reset( $_POST[ $input_name ] )
-            : wp_unslash( $_POST[ $input_name ] );
+    // 1) POST (submit)
+    if ( null !== ( $v = rgpost( $input_name ) ) ) {
+        return is_array( $v ) ? (string) reset( $v ) : (string) $v;
     }
 
+    // 2) GET (позволява тестване с ?input_1=x)
+    if ( null !== ( $v = rgget( $input_name ) ) ) {
+        return is_array( $v ) ? (string) reset( $v ) : (string) $v;
+    }
+
+    // 3) По подразбиране: празно
     return '';
+}
+
+// Замени съществуващата gfcc_enqueue_frontend функция с тази:
+
+add_action( 'gform_enqueue_scripts', 'gfcc_enqueue_frontend', 10, 2 );
+function gfcc_enqueue_frontend( $form, $is_ajax ) {
+    $config = rgar( $form, GFCC_V2_Admin::META_KEY );
+    if ( ! is_array( $config ) || empty( $config['targets'] ) ) {
+        return;
+    }
+
+    $form_id = (int) $form['id'];
+
+    // Подготви данните
+    $data = [
+        'formId'  => $form_id,
+        'mode'    => rgar( $config, 'mode', 'last_match' ),
+        'targets' => [],
+    ];
+
+    foreach ( $config['targets'] as $target_id => $target_cfg ) {
+        if ( empty( $target_cfg['enabled'] ) ) {
+            continue;
+        }
+        $target_id = (int) $target_id;
+
+        // Намери target полето
+        $field_obj = null;
+        foreach ( $form['fields'] as $f ) {
+            $fid = is_object( $f ) ? (int) $f->id : (int) rgar( $f, 'id' );
+            if ( $fid === $target_id ) {
+                $field_obj = $f;
+                break;
+            }
+        }
+        if ( ! $field_obj ) continue;
+
+        $choices = is_object( $field_obj ) ? rgar( (array) $field_obj, 'choices', [] ) : rgar( $field_obj, 'choices', [] );
+        $orig = [];
+        if ( is_array( $choices ) ) {
+            foreach ( $choices as $ch ) {
+                $val = (string) ( isset( $ch['value'] ) ? $ch['value'] : ( isset( $ch['text'] ) ? $ch['text'] : '' ) );
+                if ( $val === '' ) continue;
+                $orig[] = [
+                    'value' => $val,
+                    'text'  => (string) rgar( $ch, 'text', $val ),
+                ];
+            }
+        }
+
+        $data['targets'][ $target_id ] = [
+            'groups'          => $target_cfg['groups'],
+            'originalChoices' => $orig,
+        ];
+    }
+
+    // Първо: Регистрираме глобалната променлива
+    $inline_before = 'window.GFCC_FORMS = window.GFCC_FORMS || {};
+window.GFCC_FORMS[' . $form_id . '] = ' . wp_json_encode( $data ) . ';
+console.log("[GFCC PHP] Config registered for form ' . $form_id . '", window.GFCC_FORMS[' . $form_id . ']);';
+
+    // Проверка дали вече не е enqueue-нат глобално
+    if ( ! wp_script_is( 'gfcc-frontend', 'enqueued' ) ) {
+        wp_enqueue_script(
+            'gfcc-frontend',
+            plugin_dir_url( __FILE__ ) . 'js/frontend.js',
+            [ 'jquery' ],
+            '0.1.2', // Инкрементирай версията
+            true
+        );
+    }
+
+    // Инжектираме config-а ПРЕДИ скрипта
+    wp_add_inline_script( 'gfcc-frontend', $inline_before, 'before' );
 }
