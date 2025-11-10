@@ -172,6 +172,9 @@ class GFCC_V2_Plugin {
         $fields_with_choices = self::get_fields_with_choices_list( $form );
         $base_url = admin_url( 'admin.php?page=gf_edit_forms&view=settings&subview=' . self::SLUG . '&id=' . $form_id );
 
+        // Get IDs of fields that are already configured.
+        $configured_target_ids = isset($config['targets']) ? array_keys($config['targets']) : [];
+
         // Default structure for a new target
         if ($is_new) {
             $current_target = [
@@ -211,7 +214,12 @@ class GFCC_V2_Plugin {
                             <p><?php esc_html_e('This is the field whose choices will be changed.', 'gfcc'); ?></p>
                             <select name="gfcc_target_field_id" id="gfcc_target_field_selector" <?php echo !$is_new ? 'disabled' : ''; ?>>
                                 <option value=""><?php esc_html_e('— Select a Target Field —', 'gfcc'); ?></option>
-                                <?php foreach ($fields_with_choices as $f): ?>
+                                <?php foreach ($fields_with_choices as $f):
+                                    // On 'Add New' page, skip fields that are already configured.
+                                    if ($is_new && in_array($f['id'], $configured_target_ids)) {
+                                        continue;
+                                    }
+                                ?>
                                     <option value="<?php echo esc_attr($f['id']); ?>" <?php selected($is_new ? '' : $target_id, $f['id']); ?>>
                                         <?php echo esc_html($f['label'] . ' (#' . $f['id'] . ')'); ?>
                                     </option>

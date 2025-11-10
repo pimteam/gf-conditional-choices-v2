@@ -241,7 +241,6 @@
                 $('#gfcc_target_field_selector').trigger('change');
             }
             initSortable();
-            $('.gfcc-groups-wrapper .hndle').first().click(); // Open first group by default
         }
 
         init();
