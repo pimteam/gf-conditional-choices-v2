@@ -4,7 +4,7 @@
   // Global cache: formId -> model
   var GFCC_SIMPLE_MODELS = {};
 
-  // Изгражда бърз модел: кешира селектори и граф на зависимостите (source -> targets)
+  // Quick model: cache selectors and dependencies (source -> targets)
   function buildFormModel(formId, formConfig) {
     var $form = $('#gform_' + formId);
     if (!$form.length) return null;
@@ -18,7 +18,7 @@
       depMap: {}     // fieldId -> Set(targetIds)
     };
 
-    // Събираме таргетите и зависимостите
+    // Collect targets and deps
     Object.keys(formConfig.targets || {}).forEach(function (targetId) {
       var conf = formConfig.targets[targetId];
       var $wrapper = $form.find('#field_' + formId + '_' + targetId);
@@ -28,13 +28,13 @@
       var target;
 
       if ($select.length) {
-        // Таргетът е <select>
+        // Target is <select>
         var original = (conf.originalChoices || []).map(function (ch) {
           return { value: String(ch.value), text: ch.text };
         });
         target = { kind: 'select', $wrapper: $wrapper, $select: $select, original: original, config: conf };
       } else {
-        // Радио/чекбокс група
+        // Radio/checkbox group
         var $inputs = $wrapper.find('.gfield_radio input, .gfield_checkbox input');
         var choices = [];
         $inputs.each(function () {
@@ -48,7 +48,7 @@
 
       model.targets[targetId] = target;
 
-      // Граф на зависимостите: source field -> targets
+      // Deps graph: source field -> targets
       (conf.groups || []).forEach(function (group) {
         (group.rules || []).forEach(function (rule) {
           var fid = String(rule.fieldId);
@@ -58,7 +58,7 @@
       });
     });
 
-    // Събираме сорсовете с бързи гетъри и елементи за биндване
+    // Collect sources
     Object.keys(model.depMap).forEach(function (fid) {
       var $wrapper = $form.find('#field_' + formId + '_' + fid);
       var api = { $wrapper: $wrapper };
@@ -143,7 +143,7 @@
       return false;
     });
 
-    if (!matched) return null; // няма съвпадение → ползваме оригинала
+    if (!matched) return null; // no match -> use original
     return new Set((matched.choices || []).map(function (v) { return String(v); }));
   }
 
@@ -158,7 +158,7 @@
       var toUse = allowedSet ? original.filter(function (o) { return allowedSet.has(o.value); }) : original;
 
       var $sel = target.$select;
-      // Сравнение на списъците, за да избегнем излишни DOM операции
+      // Compare the lists to avoid unnecessary DOM operations
       var currentVals = $sel.children('option').map(function (i, el) { return el.value; }).get();
       var nextVals = toUse.map(function (o) { return o.value; });
 
@@ -180,27 +180,27 @@
         if (curr && nextVals.indexOf(String(curr)) > -1) {
           $sel.val(curr);
         } else {
-          // Без тригери на събития
+          // No triggers
           $sel.prop('selectedIndex', 0);
         }
       }
     } else {
-      // Радио/чекбокс — показвай/скривай без да тригерираш събития
+      // Radio/checkbos - show/hide without triggering events
       var allowAll = !allowedSet;
       target.choices.forEach(function (it) {
         var allow = allowAll || allowedSet.has(it.value);
 
         if (allow) {
-          // Показваме избора ако е скрит
+          // Show if hidden
           if (it.$choice.css('display') === 'none') {
             it.$choice.show();
           }
         } else {
-          // Ако е селектиран и вече не е позволен — махаме отметката без събития
+          //If selecte dbut no longer allowed remove the selection
           if (it.$input.prop('checked')) {
             it.$input.prop('checked', false);
           }
-          // Скриваме избора
+          // Hide choice
           if (it.$choice.css('display') !== 'none') {
             it.$choice.hide();
           }
@@ -226,14 +226,14 @@
   function bindHandlers(model) {
     var formId = model.formId;
 
-    // Откачаме предишни хендлъри, ако има
+    // Remove handlers if any
     Object.keys(model.sources).forEach(function (fid) {
       var src = model.sources[fid];
       if (!src.$els || !src.$els.length) return;
       src.$els.off('.gfccSimple');
     });
 
-    // Закачаме минималните нужни събития
+    // Attach minimal handlers
     Object.keys(model.sources).forEach(function (fid) {
       var src = model.sources[fid];
       if (!src.$els || !src.$els.length) return;
@@ -259,7 +259,7 @@
     var $form = $('#gform_' + formId);
     if (!$form.length) return;
 
-    // Освободи предишен модел (ако има) и събития
+    // Free previous model if any and events
     var prev = GFCC_SIMPLE_MODELS[formId];
     if (prev && prev.sources) {
       Object.keys(prev.sources).forEach(function (fid) {
@@ -274,18 +274,18 @@
     GFCC_SIMPLE_MODELS[formId] = model;
 
     bindHandlers(model);
-    // Първоначално изчисление на всички таргети
+    // Initial calculation of all targets
     applyAllTargets(model, formId);
   }
 
-  // Хук при рендер (мулти-степ и AJAX форми)
+  // Hook on render
   $(document).on('gform_post_render', function (e, formId) {
     if (window.GFCC_FORMS && window.GFCC_FORMS[formId]) {
       bindFormSimple(formId, window.GFCC_FORMS[formId]);
     }
   });
 
-  // За форми, вече налични на страницата
+  // For forms already on the page
   $(function () {
     if (window.GFCC_FORMS) {
       Object.keys(window.GFCC_FORMS).forEach(function (formId) {
