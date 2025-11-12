@@ -20,6 +20,7 @@
         // TARGET FIELD SELECTION (for new configurations)
         // =================================================================
         $('#gfcc_target_field_selector').on('change', function(){
+
             var fieldId = $(this).val();
             var $choicesBox = $('#gfcc-choices-box');
             var $choicesList = $('#gfcc-available-choices');

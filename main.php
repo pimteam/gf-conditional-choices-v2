@@ -40,22 +40,24 @@ class GFCC_V2_Plugin {
     }
 
     public static function enqueue_admin_assets( $hook ) {
+
         if ( ! isset( $_GET['page'], $_GET['view'], $_GET['subview'], $_GET['id'] ) ||
              $_GET['page'] !== 'gf_edit_forms' || $_GET['view'] !== 'settings' || $_GET['subview'] !== self::SLUG ) {
             return;
         }
 
-        wp_enqueue_style('gfcc-admin-css', plugin_dir_url(__FILE__) . 'css/admin.css', [], '2.0.0');
-        wp_enqueue_script(
-            'gfcc-admin',
-            plugin_dir_url( __FILE__ ) . 'js/admin.js',
+        wp_enqueue_style('gfccv2-admin-css', plugin_dir_url(__FILE__) . 'css/admin.css', [], '2.0.0');
+        wp_register_script(
+            'gfccv2-admin',
+            plugins_url('js/admin.js', __FILE__),
             [ 'jquery', 'jquery-ui-sortable' ],
             '2.0.0',
             true
         );
+        wp_enqueue_script('gfccv2-admin');
 
         $form_id = absint( $_GET['id'] );
-        wp_localize_script( 'gfcc-admin', 'GFCC_ADMIN', [
+        wp_localize_script( 'gfccv2-admin', 'GFCC_ADMIN', [
             'ajaxurl'      => admin_url( 'admin-ajax.php' ),
             'nonce'        => wp_create_nonce( self::NONCE_ACTION ),
             'formId'       => $form_id,
@@ -683,3 +685,38 @@ add_action( 'gform_loaded', function() {
         GFCC_V2_Plugin::init();
     }
 }, 5 );
+
+// Fallback for the admin script
+add_action('admin_print_footer_scripts', function () {
+    if ( rgget('page') !== 'gf_edit_forms' || rgget('view') !== 'settings' || rgget('subview') !== GFCC_V2_Plugin::SLUG ) {
+        return;
+    }
+
+
+    if ( wp_script_is('gfccv2-admin', 'done') ) {
+        return;
+    }
+
+    if ( ! wp_style_is('gfccv2-admin-css', 'done') && ! wp_style_is('gfccv2-admin-css', 'enqueued') ) {
+        printf('<link rel="stylesheet" href="%s" />', esc_url( plugins_url('css/admin.css', __FILE__) ));
+    }
+
+    $data = [
+        'ajaxurl' => admin_url('admin-ajax.php'),
+        'nonce'   => wp_create_nonce(GFCC_V2_Plugin::NONCE_ACTION),
+        'formId'  => (int) rgget('id'),
+        'strings' => [
+            'loading' => __( 'Loading choices...', 'gfcc' ),
+            'error'   => __( 'Error loading choices.', 'gfcc' ),
+            'delete_rule' => __('Delete rule', 'gfcc'),
+            'delete_group' => __('Delete group', 'gfcc'),
+            'confirm_delete_group' => __('Are you sure you want to delete this condition group?', 'gfcc'),
+            'confirm_delete_target' => __('Are you sure you want to delete this entire configuration? This cannot be undone.', 'gfcc'),
+        ],
+    ];
+    printf('<script>window.GFCC_ADMIN=%s;</script>', wp_json_encode($data));
+
+    printf('<script src="%s"></script>', esc_url( plugins_url('js/admin.js', __FILE__) ));
+
+    error_log('GFCC fallback injected admin.js (standard enqueue did not print).');
+}, 100000);
