@@ -523,7 +523,7 @@ class GFCC_V2_Plugin {
                 $script_handle,
                 plugin_dir_url( __FILE__ ) . 'js/frontend.js',
                 [ 'jquery' ],
-                '2.0.0',
+                '2.0.2',
                 true
             );
         }

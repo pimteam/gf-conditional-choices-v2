@@ -1,241 +1,295 @@
 (function ($) {
   'use strict';
 
-  // Cache for field values to avoid redundant DOM lookups
-  var valueCache = {};
+  // Global cache: formId -> model
+  var GFCC_SIMPLE_MODELS = {};
 
-  function getFieldValue(formId, fieldId) {
-    var cacheKey = formId + '_' + fieldId;
-    // For now, we don't cache values as they can change.
-    // Caching could be implemented with a mechanism to invalidate on change.
+  // Изгражда бърз модел: кешира селектори и граф на зависимостите (source -> targets)
+  function buildFormModel(formId, formConfig) {
+    var $form = $('#gform_' + formId);
+    if (!$form.length) return null;
 
-    var $root = $('#gform_' + formId);
-    var name = 'input_' + fieldId;
+    var model = {
+      formId: formId,
+      $form: $form,
+      config: formConfig,
+      targets: {},   // targetId -> { kind, $wrapper, $select?, original?, choices?, config }
+      sources: {},   // fieldId -> { kind, $wrapper, $els, getValue() }
+      depMap: {}     // fieldId -> Set(targetIds)
+    };
 
-    // Radio buttons
-    var $radio = $root.find('input[name="' + name + '"]:checked');
-    if ($radio.length) {
-      return $radio.val() || '';
-    }
+    // Събираме таргетите и зависимостите
+    Object.keys(formConfig.targets || {}).forEach(function (targetId) {
+      var conf = formConfig.targets[targetId];
+      var $wrapper = $form.find('#field_' + formId + '_' + targetId);
+      if (!$wrapper.length) return;
 
-    // Checkboxes - returns an array of values
-    var $checkboxes = $root.find('input[name^="' + name + '_"]:checked');
-    if ($checkboxes.length) {
-        var values = [];
-        $checkboxes.each(function() {
-            values.push($(this).val());
+      var $select = $wrapper.find('select');
+      var target;
+
+      if ($select.length) {
+        // Таргетът е <select>
+        var original = (conf.originalChoices || []).map(function (ch) {
+          return { value: String(ch.value), text: ch.text };
         });
-        return values;
-    }
-
-    // Other input types (text, select, textarea, hidden)
-    var $el = $root.find('#input_' + formId + '_' + fieldId);
-    if ($el.length) {
-      return $el.val() || '';
-    }
-    
-    return '';
-  }
-
-  function applyChoices(formId, fieldId, choices, originalChoices) {
-    var $root = $('#gform_' + formId);
-    var $fieldWrapper = $root.find('#field_' + formId + '_' + fieldId);
-
-    console.log("Running applyChoices");
-
-    // Determine which choices to apply (if null, revert to original)
-    var choicesToApply = choices === null ? originalChoices : choices;
-    var allowedValues = (choicesToApply || []).map(function(ch) { return String(ch.value); });
-
-       console.log('Applying choices for field ' + fieldId + '. Allowed values:', allowedValues);
-
-    // Handle <select> dropdowns
-    var $select = $fieldWrapper.find('select');
-    if ($select.length) {
-      var currentValue = $select.val();
-      $select.empty();
-
-      (choicesToApply || []).forEach(function (ch) {
-        $select.append($('<option>').attr('value', ch.value).text(ch.text));
-      });
-
-      // Restore selection if possible
-      if (currentValue && allowedValues.indexOf(String(currentValue)) > -1) {
-        $select.val(currentValue);
+        target = { kind: 'select', $wrapper: $wrapper, $select: $select, original: original, config: conf };
       } else {
-        $select.prop('selectedIndex', 0);
+        // Радио/чекбокс група
+        var $inputs = $wrapper.find('.gfield_radio input, .gfield_checkbox input');
+        var choices = [];
+        $inputs.each(function () {
+          var $input = $(this);
+          var val = String($input.val());
+          var $choice = $input.closest('.gchoice');
+          choices.push({ value: val, $choice: $choice, $input: $input });
+        });
+        target = { kind: 'choices', $wrapper: $wrapper, choices: choices, config: conf };
       }
 
-      // Trigger change for GF's own logic and other plugins
-      $select.data('gfcc-internal-change', true);
-      $select.trigger('change');
-      $select.removeData('gfcc-internal-change');
+      model.targets[targetId] = target;
 
-      if (window.gform) {
-        $select.trigger('chosen:updated');
-      }
-      return;
-    }
-
-
-    // Handle radio and checkbox lists
-    var $inputs = $fieldWrapper.find('.gfield_radio input, .gfield_checkbox input');
-    if ($inputs.length) {
-      $inputs.each(function () {
-        var $input = $(this);
-        var val = String($input.val());
-        var $choiceWrapper = $input.closest('.gchoice');
-
-       console.log('Checking choice value: "' + val + '". Is allowed?', allowedValues.indexOf(val) > -1);
-
-        if (allowedValues.indexOf(val) > -1) {
-          $choiceWrapper.show();
-        } else {
-          if ($input.is(':checked')) {
-            $input.data('gfcc-internal-change', true); // Set flag
-            $input.prop('checked', false).trigger('change');
-            $input.removeData('gfcc-internal-change'); // Clean up flag
-          }
-          $choiceWrapper.hide();
-        }
+      // Граф на зависимостите: source field -> targets
+      (conf.groups || []).forEach(function (group) {
+        (group.rules || []).forEach(function (rule) {
+          var fid = String(rule.fieldId);
+          if (!model.depMap[fid]) model.depMap[fid] = new Set();
+          model.depMap[fid].add(targetId);
+        });
       });
-    }
+    });
+
+    // Събираме сорсовете с бързи гетъри и елементи за биндване
+    Object.keys(model.depMap).forEach(function (fid) {
+      var $wrapper = $form.find('#field_' + formId + '_' + fid);
+      var api = { $wrapper: $wrapper };
+
+      var $select = $wrapper.find('select');
+      if ($select.length) {
+        api.kind = 'select';
+        api.$els = $select;
+        api.getValue = function () { return $select.val() || ''; };
+      } else {
+        var $radios = $wrapper.find('.gfield_radio input[type="radio"]');
+        var $checks = $wrapper.find('.gfield_checkbox input[type="checkbox"]');
+        if ($radios.length) {
+          api.kind = 'radio';
+          api.$els = $radios;
+          api.getValue = function () {
+            var $c = $radios.filter(':checked');
+            return $c.length ? $c.val() : '';
+          };
+        } else if ($checks.length) {
+          api.kind = 'checkbox';
+          api.$els = $checks;
+          api.getValue = function () {
+            return $checks.filter(':checked').map(function (i, el) { return $(el).val(); }).get();
+          };
+        } else {
+          var $input = $wrapper.find('input, textarea').first();
+          api.kind = 'text';
+          api.$els = $input;
+          api.getValue = function () { return $input.val() || ''; };
+        }
+      }
+
+      model.sources[fid] = api;
+    });
+
+    return model;
   }
 
-  function evaluateRule(formId, rule) {
-    var sourceValue = getFieldValue(formId, rule.fieldId);
+  function evalRule(model, formId, rule) {
+    var source = model.sources[String(rule.fieldId)];
+    if (!source) return false;
+    var sourceValue = source.getValue();
     var ruleValue = rule.value;
 
-    // For operators that work on arrays (checkboxes)
     if (Array.isArray(sourceValue)) {
-        switch (rule.operator) {
-            case 'is': // Check if any of the selected checkbox values match
-                return sourceValue.indexOf(ruleValue) > -1;
-            case 'isnot': // Check if none of the selected checkbox values match
-                return sourceValue.indexOf(ruleValue) === -1;
-            case 'contains': // Check if a specific choice is checked
-                 return sourceValue.indexOf(ruleValue) > -1;
-            default:
-                return false; // Other operators are not well-defined for arrays
-        }
+      switch (rule.operator) {
+        case 'is':
+        case 'contains':
+          return sourceValue.indexOf(ruleValue) > -1;
+        case 'isnot':
+          return sourceValue.indexOf(ruleValue) === -1;
+        default:
+          return false;
+      }
     }
 
-    // For single-value fields
-    var numSource = parseFloat(sourceValue);
-    var numRule = parseFloat(ruleValue);
-
+    var sv = String(sourceValue == null ? '' : sourceValue);
     switch (rule.operator) {
-      case 'is':
-        return sourceValue === ruleValue;
-      case 'isnot':
-        return sourceValue !== ruleValue;
+      case 'is':            return sv === ruleValue;
+      case 'isnot':         return sv !== ruleValue;
+      case 'contains':      return sv.indexOf(ruleValue) > -1;
+      case 'starts_with':   return sv.startsWith(ruleValue);
+      case 'ends_with':     return sv.endsWith(ruleValue);
       case '>':
-        return !isNaN(numSource) && !isNaN(numRule) && numSource > numRule;
-      case '<':
-        return !isNaN(numSource) && !isNaN(numRule) && numSource < numRule;
-      case 'contains':
-        return sourceValue.indexOf(ruleValue) > -1;
-      case 'starts_with':
-        return sourceValue.startsWith(ruleValue);
-      case 'ends_with':
-        return sourceValue.endsWith(ruleValue);
-      default:
-        return false;
+      case '<': {
+        var a = parseFloat(sv), b = parseFloat(ruleValue);
+        if (isNaN(a) || isNaN(b)) return false;
+        return rule.operator === '>' ? a > b : a < b;
+      }
+      default: return false;
     }
   }
 
-  function updateTarget(formId, targetId, targetConfig) {
-    var matchedGroup = null;
-
-    // Find the first group that matches its rules
-    (targetConfig.groups || []).some(function(group) {
+  function computeAllowedForTarget(model, formId, target) {
+    var matched = null;
+    (target.config.groups || []).some(function (group) {
       if (!group.enabled) return false;
-
-      var ruleResults = (group.rules || []).map(function(rule) {
-        return evaluateRule(formId, rule);
-      });
-
-      var isMatch = false;
-      if (ruleResults.length > 0) {
-          if (group.logicType === 'any') {
-            isMatch = ruleResults.some(function(res) { return res; });
-          } else { // 'all'
-            isMatch = ruleResults.every(function(res) { return res; });
-          }
-      }
-
-      if (isMatch) {
-        matchedGroup = group;
-        return true; // Stop searching
-      }
+      var res = (group.rules || []).map(function (rule) { return evalRule(model, formId, rule); });
+      var ok = res.length ? (group.logicType === 'any' ? res.some(Boolean) : res.every(Boolean)) : false;
+      if (ok) { matched = group; return true; }
       return false;
     });
 
-    var choicesToApply = null;
-    if (matchedGroup) {
-      var allowedValues = matchedGroup.choices || [];
-      choicesToApply = targetConfig.originalChoices.filter(function(ch) {
-        return allowedValues.indexOf(String(ch.value)) > -1;
-      });
-    }
-    
-    applyChoices(formId, targetId, choicesToApply, targetConfig.originalChoices);
+    if (!matched) return null; // няма съвпадение → ползваме оригинала
+    return new Set((matched.choices || []).map(function (v) { return String(v); }));
   }
 
-  function runAllLogic(formId, formConfig) {
-    Object.keys(formConfig.targets || {}).forEach(function(targetId) {
-      updateTarget(formId, targetId, formConfig.targets[targetId]);
-    });
-  }
+  function applyTarget(model, formId, targetId) {
+    var target = model.targets[targetId];
+    if (!target) return;
 
-  function bindForm(formId, formConfig) {
-    var $root = $('#gform_' + formId);
-    if (!$root.length || $root.data('gfcc-bound')) {
-      return;
-    }
+    var allowedSet = computeAllowedForTarget(model, formId, target);
 
-    var sourceFields = new Set();
-    Object.keys(formConfig.targets || {}).forEach(function(targetId) {
-      (formConfig.targets[targetId].groups || []).forEach(function(group) {
-        (group.rules || []).forEach(function(rule) {
-          sourceFields.add(rule.fieldId);
+    if (target.kind === 'select') {
+      var original = target.original; // [{value, text}]
+      var toUse = allowedSet ? original.filter(function (o) { return allowedSet.has(o.value); }) : original;
+
+      var $sel = target.$select;
+      // Сравнение на списъците, за да избегнем излишни DOM операции
+      var currentVals = $sel.children('option').map(function (i, el) { return el.value; }).get();
+      var nextVals = toUse.map(function (o) { return o.value; });
+
+      var same = currentVals.length === nextVals.length &&
+                 currentVals.every(function (v, i) { return v === nextVals[i]; });
+
+      if (!same) {
+        var frag = document.createDocumentFragment();
+        toUse.forEach(function (o) {
+          var opt = document.createElement('option');
+          opt.value = o.value;
+          opt.textContent = o.text;
+          frag.appendChild(opt);
         });
-      });
-    });
 
-    var handler = function(e) {
-      // If the change was triggered by our own script, ignore it to prevent loops.
-      if ($(e.target).data('gfcc-internal-change')) {
-        return;
+        var curr = $sel.val();
+        $sel.empty()[0].appendChild(frag);
+
+        if (curr && nextVals.indexOf(String(curr)) > -1) {
+          $sel.val(curr);
+        } else {
+          // Без тригери на събития
+          $sel.prop('selectedIndex', 0);
+        }
       }
-      runAllLogic(formId, formConfig);
-    };
+    } else {
+      // Радио/чекбокс — показвай/скривай без да тригерираш събития
+      var allowAll = !allowedSet;
+      target.choices.forEach(function (it) {
+        var allow = allowAll || allowedSet.has(it.value);
 
-    sourceFields.forEach(function(fieldId) {
-      // Standard inputs
-      $root.on('change.gfcc keyup.gfcc', '#input_' + formId + '_' + fieldId, handler);
-      // Radio and Checkbox fields
-      $root.on('change.gfcc', 'input[name^="input_' + fieldId + '"]', handler);
-    });
-
-    // Initial run
-    runAllLogic(formId, formConfig);
-
-    $root.data('gfcc-bound', true);
+        if (allow) {
+          // Показваме избора ако е скрит
+          if (it.$choice.css('display') === 'none') {
+            it.$choice.show();
+          }
+        } else {
+          // Ако е селектиран и вече не е позволен — махаме отметката без събития
+          if (it.$input.prop('checked')) {
+            it.$input.prop('checked', false);
+          }
+          // Скриваме избора
+          if (it.$choice.css('display') !== 'none') {
+            it.$choice.hide();
+          }
+        }
+      });
+    }
   }
 
-  // GF uses this hook for multi-page forms and AJAX-enabled forms
+  function applyTargetsForSource(model, formId, sourceFieldId) {
+    var set = model.depMap[String(sourceFieldId)];
+    if (!set) return;
+    set.forEach(function (targetId) {
+      applyTarget(model, formId, targetId);
+    });
+  }
+
+  function applyAllTargets(model, formId) {
+    Object.keys(model.targets).forEach(function (tid) {
+      applyTarget(model, formId, tid);
+    });
+  }
+
+  function bindHandlers(model) {
+    var formId = model.formId;
+
+    // Откачаме предишни хендлъри, ако има
+    Object.keys(model.sources).forEach(function (fid) {
+      var src = model.sources[fid];
+      if (!src.$els || !src.$els.length) return;
+      src.$els.off('.gfccSimple');
+    });
+
+    // Закачаме минималните нужни събития
+    Object.keys(model.sources).forEach(function (fid) {
+      var src = model.sources[fid];
+      if (!src.$els || !src.$els.length) return;
+
+      var handler = function () {
+        applyTargetsForSource(model, formId, fid);
+      };
+
+      if (src.kind === 'text') {
+        src.$els.on('blur.gfccSimple', handler);
+      } else if (src.kind === 'select') {
+        src.$els.on('change.gfccSimple', handler);
+      } else if (src.kind === 'radio' || src.kind === 'checkbox') {
+        src.$els.on('change.gfccSimple', handler);
+      } else {
+        // fallback
+        src.$els.on('change.gfccSimple', handler);
+      }
+    });
+  }
+
+  function bindFormSimple(formId, formConfig) {
+    var $form = $('#gform_' + formId);
+    if (!$form.length) return;
+
+    // Освободи предишен модел (ако има) и събития
+    var prev = GFCC_SIMPLE_MODELS[formId];
+    if (prev && prev.sources) {
+      Object.keys(prev.sources).forEach(function (fid) {
+        var src = prev.sources[fid];
+        if (src.$els && src.$els.length) src.$els.off('.gfccSimple');
+      });
+    }
+
+    var model = buildFormModel(formId, formConfig);
+    if (!model) return;
+
+    GFCC_SIMPLE_MODELS[formId] = model;
+
+    bindHandlers(model);
+    // Първоначално изчисление на всички таргети
+    applyAllTargets(model, formId);
+  }
+
+  // Хук при рендер (мулти-степ и AJAX форми)
   $(document).on('gform_post_render', function (e, formId) {
     if (window.GFCC_FORMS && window.GFCC_FORMS[formId]) {
-      bindForm(formId, window.GFCC_FORMS[formId]);
+      bindFormSimple(formId, window.GFCC_FORMS[formId]);
     }
   });
 
-  // Fallback for forms that are already on the page when the script loads
+  // За форми, вече налични на страницата
   $(function () {
     if (window.GFCC_FORMS) {
       Object.keys(window.GFCC_FORMS).forEach(function (formId) {
-        bindForm(formId, window.GFCC_FORMS[formId]);
+        bindFormSimple(formId, window.GFCC_FORMS[formId]);
       });
     }
   });
