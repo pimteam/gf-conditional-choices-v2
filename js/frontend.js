@@ -58,39 +58,38 @@
       });
     });
 
-    // Collect sources
+    // Collect sources (DYNAMIC DOM QUERYING FIX)
     Object.keys(model.depMap).forEach(function (fid) {
-      var $wrapper = $form.find('#field_' + formId + '_' + fid);
-      var api = { $wrapper: $wrapper };
+      var api = {
+        $wrapper: $form.find('#field_' + formId + '_' + fid)
+      };
 
-      var $select = $wrapper.find('select');
-      if ($select.length) {
-        api.kind = 'select';
-        api.$els = $select;
-        api.getValue = function () { return $select.val() || ''; };
-      } else {
-        var $radios = $wrapper.find('.gfield_radio input[type="radio"]');
-        var $checks = $wrapper.find('.gfield_checkbox input[type="checkbox"]');
-        if ($radios.length) {
-          api.kind = 'radio';
-          api.$els = $radios;
-          api.getValue = function () {
-            var $c = $radios.filter(':checked');
-            return $c.length ? $c.val() : '';
-          };
-        } else if ($checks.length) {
-          api.kind = 'checkbox';
-          api.$els = $checks;
-          api.getValue = function () {
-            return $checks.filter(':checked').map(function (i, el) { return $(el).val(); }).get();
-          };
-        } else {
-          var $input = $wrapper.find('input, textarea').first();
-          api.kind = 'text';
-          api.$els = $input;
-          api.getValue = function () { return $input.val() || ''; };
+      api.getValue = function () {
+        var $currentWrapper = $('#field_' + formId + '_' + fid);
+        if (!$currentWrapper.length) return '';
+
+        var $select = $currentWrapper.find('select');
+        if ($select.length) {
+          return $select.val() || '';
         }
-      }
+
+        var $radios = $currentWrapper.find('.gfield_radio input[type="radio"]:checked');
+        if ($radios.length) {
+          return $radios.val() || '';
+        }
+
+        var $checks = $currentWrapper.find('.gfield_checkbox input[type="checkbox"]:checked');
+        if ($checks.length) {
+          return $checks.map(function (i, el) { return $(el).val(); }).get();
+        }
+
+        var $input = $currentWrapper.find('input:not([type="hidden"]), textarea').first();
+        if ($input.length) {
+          return $input.val() || '';
+        }
+
+        return '';
+      };
 
       model.sources[fid] = api;
     });
@@ -100,50 +99,74 @@
 
   function evalRule(model, formId, rule) {
     var source = model.sources[String(rule.fieldId)];
-    if (!source) return false;
+    if (!source) {
+        console.warn('[GFCC Debug] Source field ' + rule.fieldId + ' not found.');
+        return false;
+    }
     var sourceValue = source.getValue();
     var ruleValue = rule.value;
+    var isMatch = false;
 
     if (Array.isArray(sourceValue)) {
       switch (rule.operator) {
         case 'is':
         case 'contains':
-          return sourceValue.indexOf(ruleValue) > -1;
+          isMatch = sourceValue.indexOf(ruleValue) > -1; break;
         case 'isnot':
-          return sourceValue.indexOf(ruleValue) === -1;
-        default:
-          return false;
+          isMatch = sourceValue.indexOf(ruleValue) === -1; break;
+      }
+    } else {
+      var sv = String(sourceValue == null ? '' : sourceValue);
+      switch (rule.operator) {
+        case 'is':            isMatch = (sv === ruleValue); break;
+        case 'isnot':         isMatch = (sv !== ruleValue); break;
+        case 'contains':      isMatch = (sv.indexOf(ruleValue) > -1); break;
+        case 'starts_with':   isMatch = sv.startsWith(ruleValue); break;
+        case 'ends_with':     isMatch = sv.endsWith(ruleValue); break;
+        case '>':
+        case '<': {
+          var a = parseFloat(sv), b = parseFloat(ruleValue);
+          if (!isNaN(a) && !isNaN(b)) {
+            isMatch = rule.operator === '>' ? a > b : a < b;
+          }
+          break;
+        }
       }
     }
 
-    var sv = String(sourceValue == null ? '' : sourceValue);
-    switch (rule.operator) {
-      case 'is':            return sv === ruleValue;
-      case 'isnot':         return sv !== ruleValue;
-      case 'contains':      return sv.indexOf(ruleValue) > -1;
-      case 'starts_with':   return sv.startsWith(ruleValue);
-      case 'ends_with':     return sv.endsWith(ruleValue);
-      case '>':
-      case '<': {
-        var a = parseFloat(sv), b = parseFloat(ruleValue);
-        if (isNaN(a) || isNaN(b)) return false;
-        return rule.operator === '>' ? a > b : a < b;
-      }
-      default: return false;
-    }
+    console.log(`[GFCC Debug] Rule Eval | Field: ${rule.fieldId} | Expected: "${ruleValue}" (${rule.operator}) | Actual Value: "${sourceValue}" | Match: ${isMatch}`);
+
+    return isMatch;
   }
 
   function computeAllowedForTarget(model, formId, target) {
     var matched = null;
+
+    console.log(`[GFCC Debug] --- Evaluating Target Field ---`);
+
     (target.config.groups || []).some(function (group) {
       if (!group.enabled) return false;
+
+      console.log(`[GFCC Debug] Checking Group: "${group.label}" (Logic: ${group.logicType})`);
+
       var res = (group.rules || []).map(function (rule) { return evalRule(model, formId, rule); });
       var ok = res.length ? (group.logicType === 'any' ? res.some(Boolean) : res.every(Boolean)) : false;
-      if (ok) { matched = group; return true; }
+
+      console.log(`[GFCC Debug] Group "${group.label}" Result: ${ok ? 'PASSED' : 'FAILED'}`);
+
+      if (ok) {
+          matched = group;
+          return true; // Спира до тук при първото съвпадение (First match wins)
+      }
       return false;
     });
 
-    if (!matched) return null; // no match -> use original
+    if (!matched) {
+        console.log(`[GFCC Debug] No groups matched. Showing original choices.`);
+        return null;
+    }
+
+    console.log(`[GFCC Debug] Applying choices from Group: "${matched.label}"`);
     return new Set((matched.choices || []).map(function (v) { return String(v); }));
   }
 
@@ -183,6 +206,9 @@
           // No triggers
           $sel.prop('selectedIndex', 0);
         }
+
+        $sel.trigger('chosen:updated');
+        $sel.trigger('change');
       }
     } else {
       // Radio/checkbos - show/hide without triggering events
@@ -225,33 +251,26 @@
 
   function bindHandlers(model) {
     var formId = model.formId;
+    var $form = model.$form;
 
-    // Remove handlers if any
+    $form.off('.gfccSimple');
+
     Object.keys(model.sources).forEach(function (fid) {
       var src = model.sources[fid];
-      if (!src.$els || !src.$els.length) return;
-      src.$els.off('.gfccSimple');
-    });
+      if (!src.$wrapper || !src.$wrapper.length) return;
 
-    // Attach minimal handlers
-    Object.keys(model.sources).forEach(function (fid) {
-      var src = model.sources[fid];
-      if (!src.$els || !src.$els.length) return;
+      var wrapperId = src.$wrapper.attr('id');
+      var selector = '#' + wrapperId + ' select, #' + wrapperId + ' input, #' + wrapperId + ' textarea';
 
-      var handler = function () {
+      $form.on('change.gfccSimple blur.gfccSimple', selector, function (e) {
+
+        if (e.type === 'blur' && (e.target.type === 'radio' || e.target.type === 'checkbox')) {
+            return;
+        }
+
+        console.log(`[GFCC Debug] Action! Event "${e.type}" fired on Source Field ${fid}. Initiating check...`);
         applyTargetsForSource(model, formId, fid);
-      };
-
-      if (src.kind === 'text') {
-        src.$els.on('blur.gfccSimple', handler);
-      } else if (src.kind === 'select') {
-        src.$els.on('change.gfccSimple', handler);
-      } else if (src.kind === 'radio' || src.kind === 'checkbox') {
-        src.$els.on('change.gfccSimple', handler);
-      } else {
-        // fallback
-        src.$els.on('change.gfccSimple', handler);
-      }
+      });
     });
   }
 

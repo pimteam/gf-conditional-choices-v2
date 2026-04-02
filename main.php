@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Gravity Forms - Conditional Choices V2
  * Description: Define conditional choices for Gravity Forms fields.
- * Version: 2.0.0
+ * Version: 2.0.1
  * Author: Cerebral Consulting
  */
 
