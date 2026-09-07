@@ -1,7 +1,7 @@
 # Gravity Forms - Conditional Choices
 
 **Contributors:** AI Assistant  
-**Version:** 2.0.0  
+**Version:** 2.0.4  
 **Requires at least:** 5.5  
 **Tested up to:** 6.4
 **Requires PHP:** 7.4
@@ -83,3 +83,18 @@ Let's say you have two fields: "Country" (Dropdown) and "State" (Dropdown). You 
 4.  **Save the configuration.**
 
 Now, on the frontend, when a user selects "USA" from the "Country" dropdown, the "State" field will automatically be populated with only the US states you assigned. If they switch to "Canada", the list will update to show the provinces. If they select a country with no rules, the "State" field will revert to its original, complete list of choices.
+
+## Changelog
+
+### 2.0.4
+*   **Fixed:** Rules against an unselected radio or checkbox field matched as though the first choice were selected. `getValue()` fell through to a generic `input` fallback that returned the first radio's `value` attribute regardless of its checked state, so a target field was filtered before the user chose anything. Unchecked radio groups now return an empty string and unchecked checkbox groups return an empty list.
+*   **Changed:** Radio and checkbox detection no longer requires the `.gfield_radio` / `.gfield_checkbox` wrapper classes, so source fields are read correctly across Gravity Forms markup versions.
+
+### 2.0.3
+*   **Fixed:** Select field placeholders were dropped whenever the choice list was rebuilt. `originalChoices` is built from `$field->choices`, which does not include the placeholder option Gravity Forms renders, so the rebuilt `<select>` was always one option short and `selectedIndex = 0` silently pre-selected the first real choice. The placeholder is now passed to the frontend and is always preserved, matched group or not.
+*   **Fixed:** The `change` event fired on every rebuild of a target `<select>`, even when the selected value was unchanged. On forms where the target drives many Gravity Forms conditional logic rules this re-evaluated the entire form on each render pass. The event now fires only on a real value change.
+*   **Added:** Fallback that reads the rendered empty-value `<option>` off the live field if the server did not supply a placeholder.
+*   **Changed:** Consolidated asset version strings into a `GFCC_V2_Plugin::VERSION` constant. The header, admin assets, and frontend script had drifted out of sync (2.0.0 / 2.0.0 / 2.0.2).
+
+### 2.0.0
+*   Initial V2 release: multiple target configurations per form, multiple condition groups with first-match-wins evaluation, `all`/`any` rule logic, drag-and-drop choice assignment, and server-side enforcement at validation and pre-submission.

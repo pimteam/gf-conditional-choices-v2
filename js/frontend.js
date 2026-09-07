@@ -32,6 +32,18 @@
         var original = (conf.originalChoices || []).map(function (ch) {
           return { value: String(ch.value), text: ch.text };
         });
+
+        // Fallback: if the server didn't send a placeholder entry, keep
+        // whatever empty-value option GF actually rendered.
+        var hasBlank = original.some(function (o) { return o.value === ''; });
+        if (!hasBlank) {
+          var $blank = $select.children('option').filter(function () {
+            return this.value === '';
+          }).first();
+          if ($blank.length) {
+            original.unshift({ value: '', text: $blank.text() });
+          }
+        }
         target = { kind: 'select', $wrapper: $wrapper, $select: $select, original: original, config: conf };
       } else {
         // Radio/checkbox group
@@ -73,17 +85,27 @@
           return $select.val() || '';
         }
 
-        var $radios = $currentWrapper.find('.gfield_radio input[type="radio"]:checked');
-        if ($radios.length) {
-          return $radios.val() || '';
+        // Radio group: an unchecked group has NO value. This must return
+        // before the generic input fallback below, which would otherwise
+        // hand back the first radio's value attribute whether or not it is
+        // selected, making rules match before the user picks anything.
+        var $radioInputs = $currentWrapper.find('input[type="radio"]');
+        if ($radioInputs.length) {
+          var $checkedRadio = $radioInputs.filter(':checked');
+          return $checkedRadio.length ? ($checkedRadio.val() || '') : '';
         }
 
-        var $checks = $currentWrapper.find('.gfield_checkbox input[type="checkbox"]:checked');
-        if ($checks.length) {
-          return $checks.map(function (i, el) { return $(el).val(); }).get();
+        // Checkbox group: same reasoning. An empty group is an empty list.
+        var $checkInputs = $currentWrapper.find('input[type="checkbox"]');
+        if ($checkInputs.length) {
+          return $checkInputs.filter(':checked').map(function (i, el) {
+            return $(el).val();
+          }).get();
         }
 
-        var $input = $currentWrapper.find('input:not([type="hidden"]), textarea').first();
+        var $input = $currentWrapper
+          .find('input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]), textarea')
+          .first();
         if ($input.length) {
           return $input.val() || '';
         }
@@ -100,7 +122,7 @@
   function evalRule(model, formId, rule) {
     var source = model.sources[String(rule.fieldId)];
     if (!source) {
-        console.warn('[GFCC Debug] Source field ' + rule.fieldId + ' not found.');
+        // console.warn('[GFCC Debug] Source field ' + rule.fieldId + ' not found.');
         return false;
     }
     var sourceValue = source.getValue();
@@ -134,7 +156,7 @@
       }
     }
 
-    console.log(`[GFCC Debug] Rule Eval | Field: ${rule.fieldId} | Expected: "${ruleValue}" (${rule.operator}) | Actual Value: "${sourceValue}" | Match: ${isMatch}`);
+    // console.log(`[GFCC Debug] Rule Eval | Field: ${rule.fieldId} | Expected: "${ruleValue}" (${rule.operator}) | Actual Value: "${sourceValue}" | Match: ${isMatch}`);
 
     return isMatch;
   }
@@ -142,17 +164,17 @@
   function computeAllowedForTarget(model, formId, target) {
     var matched = null;
 
-    console.log(`[GFCC Debug] --- Evaluating Target Field ---`);
+   // console.log(`[GFCC Debug] --- Evaluating Target Field ---`);
 
     (target.config.groups || []).some(function (group) {
       if (!group.enabled) return false;
 
-      console.log(`[GFCC Debug] Checking Group: "${group.label}" (Logic: ${group.logicType})`);
+     // console.log(`[GFCC Debug] Checking Group: "${group.label}" (Logic: ${group.logicType})`);
 
       var res = (group.rules || []).map(function (rule) { return evalRule(model, formId, rule); });
       var ok = res.length ? (group.logicType === 'any' ? res.some(Boolean) : res.every(Boolean)) : false;
 
-      console.log(`[GFCC Debug] Group "${group.label}" Result: ${ok ? 'PASSED' : 'FAILED'}`);
+     // console.log(`[GFCC Debug] Group "${group.label}" Result: ${ok ? 'PASSED' : 'FAILED'}`);
 
       if (ok) {
           matched = group;
@@ -162,11 +184,11 @@
     });
 
     if (!matched) {
-        console.log(`[GFCC Debug] No groups matched. Showing original choices.`);
+       // console.log(`[GFCC Debug] No groups matched. Showing original choices.`);
         return null;
     }
 
-    console.log(`[GFCC Debug] Applying choices from Group: "${matched.label}"`);
+    // console.log(`[GFCC Debug] Applying choices from Group: "${matched.label}"`);
     return new Set((matched.choices || []).map(function (v) { return String(v); }));
   }
 
@@ -178,7 +200,11 @@
 
     if (target.kind === 'select') {
       var original = target.original; // [{value, text}]
-      var toUse = allowedSet ? original.filter(function (o) { return allowedSet.has(o.value); }) : original;
+      // The placeholder (value === '') is never a filterable choice - it must
+      // survive every group so the field can still read as "nothing selected".
+      var toUse = allowedSet
+        ? original.filter(function (o) { return o.value === '' || allowedSet.has(o.value); })
+        : original;
 
       var $sel = target.$select;
       // Compare the lists to avoid unnecessary DOM operations
@@ -208,7 +234,15 @@
         }
 
         $sel.trigger('chosen:updated');
-        $sel.trigger('change');
+
+        // Only announce a real value change. Field 184 is a source for dozens
+        // of GF conditional logic rules, so an unconditional change event
+        // re-evaluates the whole form on every render.
+        var before = String(curr == null ? '' : curr);
+        var after  = String($sel.val() == null ? '' : $sel.val());
+        if (before !== after) {
+          $sel.trigger('change');
+        }
       }
     } else {
       // Radio/checkbos - show/hide without triggering events
@@ -268,7 +302,7 @@
             return;
         }
 
-        console.log(`[GFCC Debug] Action! Event "${e.type}" fired on Source Field ${fid}. Initiating check...`);
+        // console.log(`[GFCC Debug] Action! Event "${e.type}" fired on Source Field ${fid}. Initiating check...`);
         applyTargetsForSource(model, formId, fid);
       });
     });
